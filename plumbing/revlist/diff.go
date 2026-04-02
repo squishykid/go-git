@@ -107,7 +107,14 @@ func ObjectsDiff(
 	topoOrder := topoSortCommits(newCommits)
 
 	seen := make(map[plumbing.Hash]bool)
+	// complete tracks trees whose entire contents (recursively) are in
+	// seen, allowing safe skipping on re-encounter regardless of oldTree.
+	complete := make(map[plumbing.Hash]bool)
 	var result []plumbing.Hash
+
+	// treeCache maps commit hash → its root tree, avoiding redundant
+	// tree fetches when a commit is referenced as another's parent.
+	treeCache := make(map[plumbing.Hash]*object.Tree, len(topoOrder))
 
 	for _, lc := range topoOrder {
 		if !seen[lc.Hash] {
@@ -119,15 +126,19 @@ func ObjectsDiff(
 		if err != nil {
 			return nil, fmt.Errorf("getting tree for %s: %w", lc.Hash, err)
 		}
+		treeCache[lc.Hash] = newTree
 
 		var oldTree *object.Tree
 		if lc.NumParents() > 0 {
-			if parent, err := lc.Parent(0); err == nil {
+			ph := lc.ParentHashes[0]
+			if cached, ok := treeCache[ph]; ok {
+				oldTree = cached
+			} else if parent, err := lc.Parent(0); err == nil {
 				oldTree, _ = parent.Tree()
 			}
 		}
 
-		if err := collectChangedTreeObjects(s, newTree, oldTree, seen, &result); err != nil {
+		if err := collectChangedTreeObjects(s, newTree, oldTree, seen, complete, &result); err != nil {
 			return nil, fmt.Errorf("diffing trees for %s: %w", lc.Hash, err)
 		}
 	}
@@ -192,13 +203,18 @@ func topoSortCommits(commits []*object.Commit) []*object.Commit {
 
 // collectChangedTreeObjects walks newTree, comparing entry hashes against
 // oldTree. Subtrees with matching hashes are skipped entirely. Only new or
-// modified tree and blob hashes are added to result.
+// modified tree and blob hashes are added to result. Trees whose entire
+// contents are confirmed collected are marked in complete for fast skipping.
 func collectChangedTreeObjects(
 	s storer.EncodedObjectStorer,
 	newTree, oldTree *object.Tree,
 	seen map[plumbing.Hash]bool,
+	complete map[plumbing.Hash]bool,
 	result *[]plumbing.Hash,
 ) error {
+	if complete[newTree.Hash] {
+		return nil
+	}
 	if seen[newTree.Hash] {
 		return nil
 	}
@@ -208,9 +224,12 @@ func collectChangedTreeObjects(
 	seen[newTree.Hash] = true
 	*result = append(*result, newTree.Hash)
 
-	// Index old tree entries by name for O(1) lookup.
+	isComplete := true
+
+	// Build old-entry index. For small trees (≤8 entries), use linear
+	// scan instead of allocating a map.
 	var oldEntries map[string]plumbing.Hash
-	if oldTree != nil {
+	if oldTree != nil && len(oldTree.Entries) > 8 {
 		oldEntries = make(map[string]plumbing.Hash, len(oldTree.Entries))
 		for _, e := range oldTree.Entries {
 			oldEntries[e.Name] = e.Hash
@@ -218,38 +237,60 @@ func collectChangedTreeObjects(
 	}
 
 	for _, e := range newTree.Entries {
-		if seen[e.Hash] {
-			continue
-		}
 		if e.Mode == filemode.Submodule {
 			continue
 		}
 
-		// If same name has same hash in old tree, unchanged—skip.
-		if oldEntries != nil {
-			if oldHash, ok := oldEntries[e.Name]; ok && oldHash == e.Hash {
+		// Check if entry is unchanged from old tree.
+		if oldTree != nil {
+			if unchanged, oldHash := entryUnchanged(e.Name, e.Hash, oldEntries, oldTree); unchanged {
+				// Entry unchanged — skip but check completeness.
+				if e.Mode == filemode.Dir {
+					if !complete[e.Hash] {
+						isComplete = false
+					}
+				} else if !seen[e.Hash] {
+					isComplete = false
+				}
+				continue
+			} else if e.Mode == filemode.Dir && oldHash != plumbing.ZeroHash {
+				// Both sides are present with different hashes.
+				// Compare subtree hashes before fetching objects.
+				if seen[e.Hash] {
+					continue
+				}
+				newSub, err := object.GetTree(s, e.Hash)
+				if err != nil {
+					return fmt.Errorf("getting subtree %s: %w", e.Hash, err)
+				}
+				oldSub, err := object.GetTree(s, oldHash)
+				if err != nil {
+					oldSub = nil
+				}
+				if err := collectChangedTreeObjects(s, newSub, oldSub, seen, complete, result); err != nil {
+					return err
+				}
+				if !complete[e.Hash] {
+					isComplete = false
+				}
 				continue
 			}
 		}
 
+		if seen[e.Hash] {
+			continue
+		}
+
 		if e.Mode == filemode.Dir {
-			// Recurse into changed subtree. The recursive call adds the
-			// tree hash itself, so we don't add it here.
 			newSub, err := object.GetTree(s, e.Hash)
 			if err != nil {
 				return fmt.Errorf("getting subtree %s: %w", e.Hash, err)
 			}
-			var oldSub *object.Tree
-			if oldEntries != nil {
-				if oldHash, ok := oldEntries[e.Name]; ok {
-					oldSub, err = object.GetTree(s, oldHash)
-					if err != nil {
-						oldSub = nil
-					}
-				}
-			}
-			if err := collectChangedTreeObjects(s, newSub, oldSub, seen, result); err != nil {
+			if err := collectChangedTreeObjects(s, newSub, nil, seen, complete, result); err != nil {
 				return err
+			}
+			if !complete[e.Hash] {
+				isComplete = false
 			}
 		} else {
 			seen[e.Hash] = true
@@ -257,5 +298,29 @@ func collectChangedTreeObjects(
 		}
 	}
 
+	if isComplete {
+		complete[newTree.Hash] = true
+	}
+
 	return nil
+}
+
+// entryUnchanged checks whether name exists in the old tree with the given hash.
+// Returns (unchanged bool, oldHash). oldHash is non-zero when the name exists
+// in the old tree (even if the hash differs).
+func entryUnchanged(name string, hash plumbing.Hash, oldEntries map[string]plumbing.Hash, oldTree *object.Tree) (bool, plumbing.Hash) {
+	if oldEntries != nil {
+		if oldHash, ok := oldEntries[name]; ok {
+			return oldHash == hash, oldHash
+		}
+		return false, plumbing.ZeroHash
+	}
+	// Linear scan for small trees.
+	for i := range oldTree.Entries {
+		if oldTree.Entries[i].Name == name {
+			oh := oldTree.Entries[i].Hash
+			return oh == hash, oh
+		}
+	}
+	return false, plumbing.ZeroHash
 }
