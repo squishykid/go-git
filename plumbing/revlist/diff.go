@@ -13,7 +13,9 @@ import (
 // ObjectsDiff computes the set of object hashes reachable from localCommits but not
 // reachable from remoteCommits. It walks local and remote commits simultaneously
 // in committer-time order, only advancing the remote side far enough to
-// determine which local commits are new.
+// determine which local commits are new. Tree objects are then collected in
+// topological order (parents before children) so that the seen-set is fully
+// populated before any diff walk relies on it.
 func ObjectsDiff(
 	s storer.EncodedObjectStorer,
 	localCommits []plumbing.Hash,
@@ -23,9 +25,6 @@ func ObjectsDiff(
 	var remoteQueue []*object.Commit
 	localSeen := make(map[plumbing.Hash]bool)
 	remoteSeen := make(map[plumbing.Hash]bool)
-
-	seen := make(map[plumbing.Hash]bool)
-	var result []plumbing.Hash
 
 	// insertSorted inserts a commit into a slice sorted by committer time
 	// descending (newest first). For the small sizes involved in a typical
@@ -57,6 +56,10 @@ func ObjectsDiff(
 		insertSorted(&remoteQueue, c)
 	}
 
+	// Phase 1: Walk commits newest-first to determine which are new (local
+	// but not remote-reachable). Collect them without processing trees yet.
+	var newCommits []*object.Commit
+
 	for len(localQueue) > 0 {
 		// Pop whichever side has the newer commit.
 		if len(remoteQueue) > 0 && !remoteQueue[0].Committer.When.Before(localQueue[0].Committer.When) {
@@ -75,7 +78,7 @@ func ObjectsDiff(
 			continue
 		}
 
-		// Local commit is newer — pop and process it.
+		// Local commit is newer — pop and check.
 		lc := localQueue[0]
 		localQueue = localQueue[1:]
 
@@ -84,7 +87,29 @@ func ObjectsDiff(
 			continue
 		}
 
-		// New commit — collect its objects.
+		newCommits = append(newCommits, lc)
+
+		// Insert parents into local queue.
+		for _, ph := range lc.ParentHashes {
+			if localSeen[ph] {
+				continue
+			}
+			localSeen[ph] = true
+			if pc, err := object.GetCommit(s, ph); err == nil {
+				insertSorted(&localQueue, pc)
+			}
+		}
+	}
+
+	// Phase 2: Sort new commits in topological order (parents before
+	// children) so that a parent's full tree walk populates the seen-set
+	// before any child's diff walk relies on it for skipping.
+	topoOrder := topoSortCommits(newCommits)
+
+	seen := make(map[plumbing.Hash]bool)
+	var result []plumbing.Hash
+
+	for _, lc := range topoOrder {
 		if !seen[lc.Hash] {
 			seen[lc.Hash] = true
 			result = append(result, lc.Hash)
@@ -105,20 +130,64 @@ func ObjectsDiff(
 		if err := collectChangedTreeObjects(s, newTree, oldTree, seen, &result); err != nil {
 			return nil, fmt.Errorf("diffing trees for %s: %w", lc.Hash, err)
 		}
+	}
 
-		// Insert parents into local queue.
-		for _, ph := range lc.ParentHashes {
-			if localSeen[ph] {
-				continue
-			}
-			localSeen[ph] = true
-			if pc, err := object.GetCommit(s, ph); err == nil {
-				insertSorted(&localQueue, pc)
+	return result, nil
+}
+
+// topoSortCommits returns commits in topological order (parents before
+// children) using Kahn's algorithm. Commits whose parents are outside the
+// input set (boundary or root commits) are placed first.
+func topoSortCommits(commits []*object.Commit) []*object.Commit {
+	if len(commits) <= 1 {
+		return commits
+	}
+
+	commitMap := make(map[plumbing.Hash]*object.Commit, len(commits))
+	inDegree := make(map[plumbing.Hash]int, len(commits))
+	for _, c := range commits {
+		commitMap[c.Hash] = c
+		inDegree[c.Hash] = 0
+	}
+
+	// In-degree = number of local children referencing this commit as parent.
+	for _, c := range commits {
+		for _, ph := range c.ParentHashes {
+			if _, ok := commitMap[ph]; ok {
+				inDegree[ph]++
 			}
 		}
 	}
 
-	return result, nil
+	// Seed with leaf commits (no local children).
+	var queue []*object.Commit
+	for _, c := range commits {
+		if inDegree[c.Hash] == 0 {
+			queue = append(queue, c)
+		}
+	}
+
+	// Kahn's: peel leaves, collecting in reverse topological order.
+	ordered := make([]*object.Commit, 0, len(commits))
+	for len(queue) > 0 {
+		c := queue[0]
+		queue = queue[1:]
+		ordered = append(ordered, c)
+		for _, ph := range c.ParentHashes {
+			if _, ok := commitMap[ph]; ok {
+				inDegree[ph]--
+				if inDegree[ph] == 0 {
+					queue = append(queue, commitMap[ph])
+				}
+			}
+		}
+	}
+
+	// Reverse: leaves-first → roots-first (parents before children).
+	for i, j := 0, len(ordered)-1; i < j; i, j = i+1, j-1 {
+		ordered[i], ordered[j] = ordered[j], ordered[i]
+	}
+	return ordered
 }
 
 // collectChangedTreeObjects walks newTree, comparing entry hashes against

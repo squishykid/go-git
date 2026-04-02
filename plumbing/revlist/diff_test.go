@@ -383,6 +383,74 @@ func TestObjectsDiff_MultipleTipsBothSides(t *testing.T) {
 	require.False(t, gotSet[r3], "must not include shared ancestor r3")
 }
 
+func TestObjectsDiff_RevertedSubtreeMatchesRoot(t *testing.T) {
+	// Regression test: a subtree S in the root commit reappears in a
+	// descendant commit C after being modified in an intermediate commit P.
+	// Because C is walked first (newest-first), S goes into `seen` with
+	// only the entries that changed relative to P. When the root commit is
+	// walked (full walk, no parent), the old buggy code skipped S entirely
+	// via the `seen[S]` early return, so entries that were unchanged in
+	// C-vs-P (but only reachable through the root's copy of S) were lost.
+	//
+	// Root: {dir/ → S = {a → A, b → B}}
+	// P (parent Root): {dir/ → S_P = {a → A, b → B_new}}
+	// C (parent P):    {dir/ → S = {a → A, b → B}, x → X}
+	//
+	// Walk C vs P: S ≠ S_P → walk S: b changed (collect B), a unchanged (skip).
+	// Walk P vs Root: S_P ≠ S → walk S_P: b changed (collect B_new), a unchanged (skip).
+	// Walk Root (no parent): dir/ → S is in seen → BUG: skip! A never collected.
+	t.Parallel()
+	h := newMemHelper(t)
+
+	blobA := h.blob("a-content")
+	blobB := h.blob("b-content")
+	blobBNew := h.blob("b-new-content")
+	blobX := h.blob("x-content")
+
+	// Root's subtree S.
+	subS := h.tree([]object.TreeEntry{
+		{Name: "a.txt", Mode: filemode.Regular, Hash: blobA},
+		{Name: "b.txt", Mode: filemode.Regular, Hash: blobB},
+	})
+	treeRoot := h.tree([]object.TreeEntry{
+		{Name: "dir", Mode: filemode.Dir, Hash: subS},
+	})
+	cRoot := h.commit(treeRoot)
+
+	// P modifies b inside dir/.
+	subSP := h.tree([]object.TreeEntry{
+		{Name: "a.txt", Mode: filemode.Regular, Hash: blobA},
+		{Name: "b.txt", Mode: filemode.Regular, Hash: blobBNew},
+	})
+	treeP := h.tree([]object.TreeEntry{
+		{Name: "dir", Mode: filemode.Dir, Hash: subSP},
+	})
+	cP := h.commit(treeP, cRoot)
+
+	// C reverts b back to original AND adds a new top-level file.
+	// dir/ → S (same hash as Root's dir/).
+	treeC := h.tree([]object.TreeEntry{
+		{Name: "dir", Mode: filemode.Dir, Hash: subS},
+		{Name: "x.txt", Mode: filemode.Regular, Hash: blobX},
+	})
+	cC := h.commit(treeC, cP)
+
+	assertObjectsDiffSubset(t, h.s, []plumbing.Hash{cC}, nil)
+
+	got, err := ObjectsDiff(h.s, []plumbing.Hash{cC}, nil)
+	require.NoError(t, err)
+
+	gotSet := make(map[plumbing.Hash]bool, len(got))
+	for _, gh := range got {
+		gotSet[gh] = true
+	}
+
+	require.True(t, gotSet[blobA], "must include blobA (reachable from root, inside shared subtree S)")
+	require.True(t, gotSet[blobB], "must include blobB (reverted in C, changed vs P)")
+	require.True(t, gotSet[blobBNew], "must include blobBNew (introduced in P)")
+	require.True(t, gotSet[blobX], "must include blobX (new in C)")
+}
+
 // --- Benchmarks ---
 
 func buildBenchRepo(b *testing.B, numCommits, numFiles int) (*memory.Storage, plumbing.Hash, plumbing.Hash) {
