@@ -1,6 +1,8 @@
 package bitmap
 
 import (
+	"errors"
+
 	"github.com/erizocosmico/go-ewah"
 	"github.com/go-git/go-git/v6/plumbing"
 )
@@ -19,6 +21,10 @@ const (
 	// name-hash values, one per object in the pack.
 	OptHashCache = 0x4
 )
+
+// ErrInvalidXOROffset is returned when a bitmap entry references
+// an XOR offset that is out of range.
+var ErrInvalidXOROffset = errors.New("bitmap entry has invalid XOR offset")
 
 var bitmapHeader = []byte{'B', 'I', 'T', 'M'}
 
