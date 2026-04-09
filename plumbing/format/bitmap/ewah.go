@@ -3,7 +3,6 @@ package bitmap
 import (
 	"encoding/binary"
 	"fmt"
-	"io"
 )
 
 // BitmapEWAH holds the raw on-disk EWAH-compressed bitmap data:
@@ -42,25 +41,6 @@ func (b Bitmap) Get(pos uint32) bool {
 // Bits returns the number of bits in the bitmap (always a multiple of 8).
 func (b Bitmap) Bits() uint32 {
 	return uint32(len(b)) * 8
-}
-
-// ReadEWAH reads a single EWAH-encoded bitmap from r and returns the
-// raw compressed bytes. It reads exactly the number of bytes specified
-// by the on-disk header (8 + wordCount*8 + 4).
-func ReadEWAH(r io.Reader) (BitmapEWAH, error) {
-	var header [8]byte
-	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return nil, fmt.Errorf("ewah: reading header: %w", err)
-	}
-	wordCount := binary.BigEndian.Uint32(header[4:8])
-
-	remaining := int(wordCount)*8 + 4
-	data := make(BitmapEWAH, 8+remaining)
-	copy(data, header[:])
-	if _, err := io.ReadFull(r, data[8:]); err != nil {
-		return nil, fmt.Errorf("ewah: reading body: %w", err)
-	}
-	return data, nil
 }
 
 // DecodeEWAH decompresses an EWAH-encoded bitmap into a flat Bitmap.

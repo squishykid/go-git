@@ -104,6 +104,32 @@ func TestDecodeEWAH(t *testing.T) {
 		assert.True(t, bm.Get(127))
 	})
 
+	t.Run("trailing data ignored", func(t *testing.T) {
+		t.Parallel()
+		// Two EWAH bitmaps concatenated. DecodeEWAH should only
+		// read the first, ignoring the second.
+		first := encodeEWAH(64, []uint64{rlw(true, 1, 0)}, 0)  // all ones
+		second := encodeEWAH(64, []uint64{rlw(false, 1, 0)}, 0) // all zeros
+
+		combined := append(first, second...)
+		bm, err := DecodeEWAH(combined)
+		require.NoError(t, err)
+		assert.Equal(t, 8, len(bm))
+
+		for i := uint32(0); i < 64; i++ {
+			assert.True(t, bm.Get(i), "bit %d", i)
+		}
+
+		// Decoding from an offset into the same slice yields the second bitmap.
+		bm2, err := DecodeEWAH(combined[len(first):])
+		require.NoError(t, err)
+		assert.Equal(t, 8, len(bm2))
+
+		for i := uint32(0); i < 64; i++ {
+			assert.False(t, bm2.Get(i), "bit %d", i)
+		}
+	})
+
 	t.Run("too short", func(t *testing.T) {
 		t.Parallel()
 		_, err := DecodeEWAH([]byte{0, 0, 0})

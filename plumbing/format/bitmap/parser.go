@@ -2,6 +2,7 @@ package bitmap
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -110,19 +111,19 @@ func (d *Decoder) decodeHeader(idx *Index) error {
 
 func (d *Decoder) decodeTypeBitmaps(idx *Index) error {
 	var err error
-	idx.Commits, err = ReadEWAH(d)
+	idx.Commits, err = d.readEWAH()
 	if err != nil {
 		return fmt.Errorf("reading commits bitmap: %w", err)
 	}
-	idx.Trees, err = ReadEWAH(d)
+	idx.Trees, err = d.readEWAH()
 	if err != nil {
 		return fmt.Errorf("reading trees bitmap: %w", err)
 	}
-	idx.Blobs, err = ReadEWAH(d)
+	idx.Blobs, err = d.readEWAH()
 	if err != nil {
 		return fmt.Errorf("reading blobs bitmap: %w", err)
 	}
-	idx.Tags, err = ReadEWAH(d)
+	idx.Tags, err = d.readEWAH()
 	if err != nil {
 		return fmt.Errorf("reading tags bitmap: %w", err)
 	}
@@ -137,7 +138,7 @@ func (d *Decoder) decodeEntries(idx *Index) error {
 			return fmt.Errorf("reading entry %d header: %w", i, err)
 		}
 
-		bm, err := ReadEWAH(d)
+		bm, err := d.readEWAH()
 		if err != nil {
 			return fmt.Errorf("reading entry %d bitmap: %w", i, err)
 		}
@@ -150,6 +151,23 @@ func (d *Decoder) decodeEntries(idx *Index) error {
 		}
 	}
 	return nil
+}
+
+// readEWAH reads a single EWAH entry from the stream, returning the raw
+// compressed bytes.
+func (d *Decoder) readEWAH() (BitmapEWAH, error) {
+	var header [8]byte
+	if _, err := io.ReadFull(d, header[:]); err != nil {
+		return nil, err
+	}
+	wordCount := binary.BigEndian.Uint32(header[4:8])
+
+	data := make(BitmapEWAH, 8+int(wordCount)*8+4)
+	copy(data, header[:])
+	if _, err := io.ReadFull(d, data[8:]); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func (d *Decoder) decodeNameHashCache(idx *Index) error {
