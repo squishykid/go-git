@@ -11,29 +11,29 @@ import (
 // Searcher provides object reachability lookups using a bitmap index
 // combined with a pack index and reverse index.
 type Searcher struct {
+	idx      BitmapIndex
+	hashSize int
+
 	// packOrderHashes maps pack-offset position to object hash.
-	// Bitmap bits are indexed by pack-offset position.
 	packOrderHashes []plumbing.Hash
 	// hashToIdxPos maps object hash to its pack index position.
 	hashToIdxPos map[plumbing.Hash]uint32
 
-	// entries is the raw entry list from the decoded Index.
-	entries []Entry
-	// entryIndex maps ObjectPosition (idx position) to the index
-	// into entries.
+	// entryIndex maps ObjectPosition (idx position) to the entry
+	// ordinal in the bitmap file.
 	entryIndex map[uint32]int
 	// cache holds decompressed and XOR-resolved bitmaps, keyed by
-	// entry index. Populated lazily on first access.
+	// entry ordinal. Populated lazily on first access.
 	cache []Bitmap
 }
 
-// NewSearcher builds a Searcher by combining a decoded bitmap Index with
-// the corresponding pack Index and reverse index.
+// NewSearcher builds a Searcher by combining a decoded bitmap BitmapIndex with
+// the corresponding pack BitmapIndex and reverse index.
 //
 // packOrder maps pack-offset position to pack index position, as
 // decoded from the reverse index (.rev) file. It must have one entry
 // per object in the pack.
-func NewSearcher(bitmapIdx *Index, packIdx idxfile.Index, packOrder []uint32) (*Searcher, error) {
+func NewSearcher(bitmapIdx BitmapIndex, hashSize int, packIdx idxfile.Index, packOrder []uint32) (*Searcher, error) {
 	count, err := packIdx.Count()
 	if err != nil {
 		return nil, fmt.Errorf("reading pack index count: %w", err)
@@ -65,17 +65,22 @@ func NewSearcher(bitmapIdx *Index, packIdx idxfile.Index, packOrder []uint32) (*
 		packOrderHashes[packPos] = idxHashes[idxPos]
 	}
 
-	entryIndex := make(map[uint32]int, len(bitmapIdx.Entries))
-	for i, e := range bitmapIdx.Entries {
+	entryCount := int(bitmapIdx.EntryCount())
+	entryIndex := make(map[uint32]int, entryCount)
+	off := bitmapIdx.entriesOffset(hashSize)
+	for i := range entryCount {
+		e := parseEntry(bitmapIdx[off:])
 		entryIndex[e.ObjectPosition] = i
+		off += entrySize(bitmapIdx[off:])
 	}
 
 	return &Searcher{
+		idx:             bitmapIdx,
+		hashSize:        hashSize,
 		packOrderHashes: packOrderHashes,
 		hashToIdxPos:    hashToIdxPos,
-		entries:         bitmapIdx.Entries,
 		entryIndex:      entryIndex,
-		cache:           make([]Bitmap, len(bitmapIdx.Entries)),
+		cache:           make([]Bitmap, entryCount),
 	}, nil
 }
 
@@ -108,23 +113,23 @@ func (s *Searcher) Reachable(commit plumbing.Hash) ([]plumbing.Hash, error) {
 }
 
 // resolve returns the decompressed, XOR-resolved bitmap for the entry
-// at the given index, populating the cache on first access.
-func (s *Searcher) resolve(idx int) (Bitmap, error) {
-	if bm := s.cache[idx]; bm != nil {
+// at the given ordinal, populating the cache on first access.
+func (s *Searcher) resolve(ordinal int) (Bitmap, error) {
+	if bm := s.cache[ordinal]; bm != nil {
 		return bm, nil
 	}
 
-	e := s.entries[idx]
+	e := s.idx.Entry(s.hashSize, ordinal)
 	bm, err := DecodeEWAH(e.Bitmap)
 	if err != nil {
-		return nil, fmt.Errorf("decompressing entry %d: %w", idx, err)
+		return nil, fmt.Errorf("decompressing entry %d: %w", ordinal, err)
 	}
 
 	if e.XOROffset > 0 {
-		base := idx - int(e.XOROffset)
+		base := ordinal - int(e.XOROffset)
 		if base < 0 {
 			return nil, fmt.Errorf("%w: entry %d references offset %d",
-				ErrInvalidXOROffset, idx, e.XOROffset)
+				ErrInvalidXOROffset, ordinal, e.XOROffset)
 		}
 		baseBm, err := s.resolve(base)
 		if err != nil {
@@ -133,7 +138,7 @@ func (s *Searcher) resolve(idx int) (Bitmap, error) {
 		bm = xorBitmaps(bm, baseBm)
 	}
 
-	s.cache[idx] = bm
+	s.cache[ordinal] = bm
 	return bm, nil
 }
 

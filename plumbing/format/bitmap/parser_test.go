@@ -2,6 +2,7 @@ package bitmap
 
 import (
 	"crypto"
+	"encoding/hex"
 	"io"
 	"testing"
 
@@ -14,65 +15,62 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestDecode(t *testing.T) {
-	t.Parallel()
+var testHashSize = crypto.SHA1.Size()
 
+func openFixture(t testing.TB) BitmapIndex {
+	t.Helper()
 	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
-	f, err := q.Bitmap()
 
-	//f, err := os.Open(sampleBitmap)
+	f, err := q.Bitmap()
 	require.NoError(t, err)
 	defer f.Close()
 
-	h := hash.New(crypto.SHA1)
-	d := NewDecoder(f, h)
-
-	var idx Index
-	err = d.Decode(&idx)
+	data, err := io.ReadAll(f)
 	require.NoError(t, err)
 
-	assert.Equal(t, uint16(1), idx.Version)
-	assert.Equal(t, uint16(OptFullDAG|OptHashCache), idx.Flags)
-
-	// Pack checksum should match the filename.
-	assert.Equal(t, q.PackfileHash, idx.PackChecksum.String())
-
-	// 140 bitmap entries.
-	assert.Len(t, idx.Entries, 140)
-
-	// Type bitmaps should be present.
-	assert.NotNil(t, idx.Commits)
-	assert.NotNil(t, idx.Trees)
-	assert.NotNil(t, idx.Blobs)
-	assert.NotNil(t, idx.Tags)
-
-	// Type bitmap bit counts (from EWAH headers).
-	assert.Equal(t, uint32(6731), idx.Commits.BitCount())
-	assert.Equal(t, uint32(25072), idx.Trees.BitCount())
-	assert.Equal(t, uint32(25061), idx.Blobs.BitCount())
-	assert.Equal(t, uint32(0), idx.Tags.BitCount())
-
-	// Name-hash cache should have one entry per object in the pack.
-	assert.Len(t, idx.NameHashCache, 25072)
+	idx, err := Open(data, hash.New(crypto.SHA1))
+	require.NoError(t, err)
+	return idx
 }
 
-func TestDecodeEntries(t *testing.T) {
+func TestOpen(t *testing.T) {
 	t.Parallel()
 
 	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
+
 	f, err := q.Bitmap()
 	require.NoError(t, err)
 	defer f.Close()
 
-	h := hash.New(crypto.SHA1)
-	d := NewDecoder(f, h)
-
-	var idx Index
-	err = d.Decode(&idx)
+	data, err := io.ReadAll(f)
 	require.NoError(t, err)
 
+	idx, err := Open(data, hash.New(crypto.SHA1))
+	require.NoError(t, err)
+
+	assert.Equal(t, uint16(1), idx.Version())
+	assert.Equal(t, uint16(OptFullDAG|OptHashCache), idx.Flags())
+	assert.Equal(t, q.PackfileHash, hex.EncodeToString(idx.PackChecksum(testHashSize)))
+	assert.Equal(t, uint32(140), idx.EntryCount())
+
+	// Type bitmap bit counts (from EWAH headers).
+	assert.Equal(t, uint32(6731), idx.Commits(testHashSize).BitCount())
+	assert.Equal(t, uint32(25072), idx.Trees(testHashSize).BitCount())
+	assert.Equal(t, uint32(25061), idx.Blobs(testHashSize).BitCount())
+	assert.Equal(t, uint32(0), idx.Tags(testHashSize).BitCount())
+
+	// Name-hash cache: 4 bytes per object, 25072 objects.
+	cache := idx.NameHashCache(testHashSize)
+	assert.Equal(t, 25072*4, len(cache))
+}
+
+func TestOpenEntries(t *testing.T) {
+	t.Parallel()
+
+	idx := openFixture(t)
+
 	// First entry.
-	e := idx.Entries[0]
+	e := idx.Entry(testHashSize, 0)
 	assert.Equal(t, uint32(2393), e.ObjectPosition)
 	assert.Equal(t, uint8(0), e.XOROffset)
 	assert.Equal(t, uint8(0), e.Flags)
@@ -80,45 +78,58 @@ func TestDecodeEntries(t *testing.T) {
 	assert.Equal(t, uint32(25088), e.Bitmap.BitCount())
 
 	// Second entry has XOR offset 1.
-	e = idx.Entries[1]
+	e = idx.Entry(testHashSize, 1)
 	assert.Equal(t, uint32(12044), e.ObjectPosition)
 	assert.Equal(t, uint8(1), e.XOROffset)
 }
 
-func BenchmarkDecode(b *testing.B) {
+func TestOpenInvalidSignature(t *testing.T) {
+	t.Parallel()
+
 	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
+	f, err := q.Idx()
+	require.NoError(t, err)
+	defer f.Close()
 
-	for b.Loop() {
-		f, err := q.Bitmap()
-		require.NoError(b, err)
+	data, err := io.ReadAll(f)
+	require.NoError(t, err)
 
-		h := hash.New(crypto.SHA1)
-		d := NewDecoder(f, h)
-
-		var idx Index
-		err = d.Decode(&idx)
-		require.NoError(b, err)
-
-		f.Close()
-	}
+	_, err = Open(data, hash.New(crypto.SHA1))
+	assert.ErrorIs(t, err, ErrInvalidSignature)
 }
 
-func BenchmarkDecodeEWAH(b *testing.B) {
+func BenchmarkOpen(b *testing.B) {
 	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
 
 	f, err := q.Bitmap()
 	require.NoError(b, err)
 	defer f.Close()
 
-	h := hash.New(crypto.SHA1)
-	var idx Index
-	require.NoError(b, NewDecoder(f, h).Decode(&idx))
-	require.GreaterOrEqual(b, len(idx.Entries), 100)
+	data, err := io.ReadAll(f)
+	require.NoError(b, err)
+
+	for b.Loop() {
+		_, err := Open(data, hash.New(crypto.SHA1))
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkDecodeEWAH(b *testing.B) {
+	idx := openFixture(b)
+	require.GreaterOrEqual(b, int(idx.EntryCount()), 100)
+
+	// Collect all entry bitmaps.
+	entries := make([]BitmapEWAH, idx.EntryCount())
+	for i := range entries {
+		entries[i] = idx.Entry(testHashSize, i).Bitmap
+	}
 
 	b.ResetTimer()
 	for b.Loop() {
-		for _, data := range idx.Entries {
-			_, err := DecodeEWAH(data.Bitmap)
+		for _, data := range entries {
+			_, err := DecodeEWAH(data)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -126,7 +137,7 @@ func BenchmarkDecodeEWAH(b *testing.B) {
 	}
 }
 
-func loadSearcherFixture(t *testing.T) (*Index, *Searcher, []plumbing.Hash) {
+func loadSearcherFixture(t *testing.T) (BitmapIndex, *Searcher, []plumbing.Hash) {
 	t.Helper()
 	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
 
@@ -134,9 +145,11 @@ func loadSearcherFixture(t *testing.T) (*Index, *Searcher, []plumbing.Hash) {
 	require.NoError(t, err)
 	defer bf.Close()
 
-	h := hash.New(crypto.SHA1)
-	var idx Index
-	require.NoError(t, NewDecoder(bf, h).Decode(&idx))
+	data, err := io.ReadAll(bf)
+	require.NoError(t, err)
+
+	idx, err := Open(data, hash.New(crypto.SHA1))
+	require.NoError(t, err)
 
 	idxf, err := q.Idx()
 	require.NoError(t, err)
@@ -162,7 +175,7 @@ func loadSearcherFixture(t *testing.T) (*Index, *Searcher, []plumbing.Hash) {
 		packOrder = append(packOrder, pos)
 	}
 
-	s, err := NewSearcher(&idx, packIdx, packOrder)
+	s, err := NewSearcher(idx, testHashSize, packIdx, packOrder)
 	require.NoError(t, err)
 
 	// Build idx position → hash list for test lookups.
@@ -180,7 +193,7 @@ func loadSearcherFixture(t *testing.T) (*Index, *Searcher, []plumbing.Hash) {
 		idxHashes = append(idxHashes, e.Hash)
 	}
 
-	return &idx, s, idxHashes
+	return idx, s, idxHashes
 }
 
 func TestSearcherReachable(t *testing.T) {
@@ -188,7 +201,7 @@ func TestSearcherReachable(t *testing.T) {
 
 	bitmapIdx, s, idxHashes := loadSearcherFixture(t)
 
-	commitHash := idxHashes[bitmapIdx.Entries[0].ObjectPosition]
+	commitHash := idxHashes[bitmapIdx.Entry(testHashSize, 0).ObjectPosition]
 
 	reachable, err := s.Reachable(commitHash)
 	require.NoError(t, err)
@@ -200,10 +213,10 @@ func TestSearcherXORResolution(t *testing.T) {
 
 	bitmapIdx, s, idxHashes := loadSearcherFixture(t)
 
-	// The second entry has XOROffset=1 — verify XOR resolution works.
-	require.Equal(t, uint8(1), bitmapIdx.Entries[1].XOROffset)
+	e := bitmapIdx.Entry(testHashSize, 1)
+	require.Equal(t, uint8(1), e.XOROffset)
 
-	commitHash := idxHashes[bitmapIdx.Entries[1].ObjectPosition]
+	commitHash := idxHashes[e.ObjectPosition]
 
 	reachable, err := s.Reachable(commitHash)
 	require.NoError(t, err)
@@ -217,20 +230,4 @@ func TestSearcherNotFound(t *testing.T) {
 
 	_, err := s.Reachable(plumbing.NewHash("0000000000000000000000000000000000000000"))
 	assert.ErrorIs(t, err, plumbing.ErrObjectNotFound)
-}
-
-func TestDecodeInvalidSignature(t *testing.T) {
-	t.Parallel()
-
-	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
-	f, err := q.Idx()
-	require.NoError(t, err)
-	defer f.Close()
-
-	h := hash.New(crypto.SHA1)
-	d := NewDecoder(f, h)
-
-	var idx Index
-	err = d.Decode(&idx)
-	assert.ErrorIs(t, err, ErrInvalidSignature)
 }

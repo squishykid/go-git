@@ -22,6 +22,16 @@ func (b BitmapEWAH) BitCount() uint32 {
 	return binary.BigEndian.Uint32(b[0:4])
 }
 
+// Size returns the total on-disk byte size of this EWAH entry
+// (header + compressed words + trailing RLW position).
+func (b BitmapEWAH) Size() int {
+	if len(b) < 8 {
+		return 0
+	}
+	wordCount := binary.BigEndian.Uint32(b[4:8])
+	return 4 + 4 + int(wordCount)*8 + 4
+}
+
 // Bitmap is a decompressed bitmap stored as a byte slice. Bit i is stored
 // at byte i/8, bit position 7-(i%8) (big-endian / MSB-first within each
 // byte), matching the git pack-bitmap convention where the most
