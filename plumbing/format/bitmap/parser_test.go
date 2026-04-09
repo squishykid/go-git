@@ -17,7 +17,7 @@ import (
 
 var testHashSize = crypto.SHA1.Size()
 
-func openFixture(t testing.TB) BitmapIndex {
+func openFixture(t testing.TB) Index {
 	t.Helper()
 	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
 
@@ -121,7 +121,7 @@ func BenchmarkDecodeEWAH(b *testing.B) {
 	require.GreaterOrEqual(b, int(idx.EntryCount()), 100)
 
 	// Collect all entry bitmaps.
-	entries := make([]BitmapEWAH, idx.EntryCount())
+	entries := make([]EWAH, idx.EntryCount())
 	for i := range entries {
 		entries[i] = idx.Entry(testHashSize, i).Bitmap
 	}
@@ -137,7 +137,7 @@ func BenchmarkDecodeEWAH(b *testing.B) {
 	}
 }
 
-func loadSearcherFixture(t *testing.T) (BitmapIndex, *Searcher, []plumbing.Hash) {
+func loadSearcherFixture(t *testing.T) (Index, *Searcher, []plumbing.Hash) {
 	t.Helper()
 	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
 

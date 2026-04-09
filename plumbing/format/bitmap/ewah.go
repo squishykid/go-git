@@ -5,17 +5,17 @@ import (
 	"fmt"
 )
 
-// BitmapEWAH holds the raw on-disk EWAH-compressed bitmap data:
+// EWAH holds the raw on-disk EWAH-compressed bitmap data:
 //
 //	4-byte bit count (big-endian)
 //	4-byte compressed word count (big-endian)
 //	N × 8-byte compressed words (big-endian)
 //	4-byte RLW position (big-endian)
-type BitmapEWAH []byte
+type EWAH []byte
 
 // BitCount returns the number of uncompressed bits described by the
 // compressed bitmap.
-func (b BitmapEWAH) BitCount() uint32 {
+func (b EWAH) BitCount() uint32 {
 	if len(b) < 4 {
 		return 0
 	}
@@ -24,7 +24,7 @@ func (b BitmapEWAH) BitCount() uint32 {
 
 // Size returns the total on-disk byte size of this EWAH entry
 // (header + compressed words + trailing RLW position).
-func (b BitmapEWAH) Size() int {
+func (b EWAH) Size() int {
 	if len(b) < 8 {
 		return 0
 	}
@@ -54,7 +54,7 @@ func (b Bitmap) Bits() uint32 {
 }
 
 // DecodeEWAH decompresses an EWAH-encoded bitmap into a flat Bitmap.
-func DecodeEWAH(data BitmapEWAH) (Bitmap, error) {
+func DecodeEWAH(data EWAH) (Bitmap, error) {
 	if len(data) < 12 {
 		return nil, fmt.Errorf("ewah: data too short (%d bytes, need at least 12)", len(data))
 	}

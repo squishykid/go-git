@@ -24,8 +24,8 @@ var (
 )
 
 // Open validates the raw bytes of a bitmap index file and returns an
-// BitmapIndex for on-demand field access. h is used for checksum verification.
-func Open(data []byte, h hash.Hash) (BitmapIndex, error) {
+// Index for on-demand field access. h is used for checksum verification.
+func Open(data []byte, h hash.Hash) (Index, error) {
 	hashSize := h.Size()
 	minSize := headerFixedSize + hashSize + hashSize // header + at least trailing checksum
 	if len(data) < minSize {
@@ -36,7 +36,7 @@ func Open(data []byte, h hash.Hash) (BitmapIndex, error) {
 		return nil, ErrInvalidSignature
 	}
 
-	idx := BitmapIndex(data)
+	idx := Index(data)
 
 	if idx.Version() != VersionSupported {
 		return nil, fmt.Errorf("%w: %d", ErrUnsupportedVersion, idx.Version())

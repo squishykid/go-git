@@ -11,7 +11,7 @@ import (
 // Searcher provides object reachability lookups using a bitmap index
 // combined with a pack index and reverse index.
 type Searcher struct {
-	idx      BitmapIndex
+	idx      Index
 	hashSize int
 
 	// packOrderHashes maps pack-offset position to object hash.
@@ -27,13 +27,13 @@ type Searcher struct {
 	cache []Bitmap
 }
 
-// NewSearcher builds a Searcher by combining a decoded bitmap BitmapIndex with
-// the corresponding pack BitmapIndex and reverse index.
+// NewSearcher builds a Searcher by combining a decoded bitmap Index with
+// the corresponding pack Index and reverse index.
 //
 // packOrder maps pack-offset position to pack index position, as
 // decoded from the reverse index (.rev) file. It must have one entry
 // per object in the pack.
-func NewSearcher(bitmapIdx BitmapIndex, hashSize int, packIdx idxfile.Index, packOrder []uint32) (*Searcher, error) {
+func NewSearcher(bitmapIdx Index, hashSize int, packIdx idxfile.Index, packOrder []uint32) (*Searcher, error) {
 	count, err := packIdx.Count()
 	if err != nil {
 		return nil, fmt.Errorf("reading pack index count: %w", err)
