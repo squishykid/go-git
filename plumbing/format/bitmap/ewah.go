@@ -53,6 +53,52 @@ func (b Bitmap) Bits() uint32 {
 	return uint32(len(b)) * 8
 }
 
+// Extend grows b with zero bytes so that it is at least as long as
+// other, returning the (possibly reallocated) bitmap.
+func Extend(b, other Bitmap) Bitmap {
+	if len(b) >= len(other) {
+		return b
+	}
+	grown := make(Bitmap, len(other))
+	copy(grown, b)
+	return grown
+}
+
+// And applies bitwise AND with other, modifying b in place.
+// Only the first min(len(b), len(other)) bytes are ANDed; any
+// trailing bytes in b beyond len(other) are zeroed.
+func (b Bitmap) And(other Bitmap) {
+	n := min(len(b), len(other))
+	for i := range n {
+		b[i] &= other[i]
+	}
+	for i := n; i < len(b); i++ {
+		b[i] = 0
+	}
+}
+
+// Or applies bitwise OR with other, modifying b in place.
+// Panics if other is longer than b.
+func (b Bitmap) Or(other Bitmap) {
+	if len(other) > len(b) {
+		panic("bitmap: Or: other bitmap is longer than receiver")
+	}
+	for i := range len(other) {
+		b[i] |= other[i]
+	}
+}
+
+// Xor applies bitwise XOR with other, modifying b in place.
+// Panics if other is longer than b.
+func (b Bitmap) Xor(other Bitmap) {
+	if len(other) > len(b) {
+		panic("bitmap: Xor: other bitmap is longer than receiver")
+	}
+	for i := range len(other) {
+		b[i] ^= other[i]
+	}
+}
+
 // SetBitsIterator iterates over the indices of set bits in a Bitmap.
 type SetBitsIterator struct {
 	b   Bitmap

@@ -14,6 +14,7 @@ type Searcher struct {
 
 	// entryIndex maps ObjectPosition (idx position) to the entry
 	// ordinal in the bitmap file.
+	// TODO: optimise with scannedOffsets
 	entryIndex map[uint32]int
 	// cache holds decompressed and XOR-resolved bitmaps, keyed by
 	// entry ordinal. Populated lazily on first access.
@@ -70,7 +71,7 @@ func (s *Searcher) resolve(ordinal int) (Bitmap, error) {
 		if err != nil {
 			return nil, err
 		}
-		bm = xorBitmaps(bm, baseBm)
+		bm.Xor(baseBm)
 	}
 
 	s.cache[ordinal] = bm
@@ -85,29 +86,8 @@ func (s *Searcher) ReachableCommits(bm Bitmap) (*SetBitsIterator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decompressing commits bitmap: %w", err)
 	}
-	return andBitmaps(bm, commits).SetBits(), nil
-}
-
-// andBitmaps returns a new Bitmap where each byte is a AND b.
-func andBitmaps(a, b Bitmap) Bitmap {
-	n := min(len(a), len(b))
-	out := make(Bitmap, n)
-	for i := range n {
-		out[i] = a[i] & b[i]
-	}
-	return out
-}
-
-// xorBitmaps returns a new Bitmap where each byte is a XOR b.
-func xorBitmaps(a, b Bitmap) Bitmap {
-	n := max(len(a), len(b))
-	out := make(Bitmap, n)
-	copy(out, a)
-	for i := range min(len(out), len(b)) {
-		out[i] ^= b[i]
-	}
-	if len(b) > len(a) {
-		copy(out[len(a):], b[len(a):])
-	}
-	return out
+	result := make(Bitmap, len(bm))
+	copy(result, bm)
+	result.And(commits)
+	return result.SetBits(), nil
 }
