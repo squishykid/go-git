@@ -43,7 +43,7 @@ func NewSearcher(bitmapIdx *Index) *Searcher {
 func (s *Searcher) Reachable(idxPos uint32) (Bitmap, error) {
 	ei, ok := s.entryIndex[idxPos]
 	if !ok {
-		return nil, fmt.Errorf("%w: %d", ErrNoEntry, idxPos)
+		return nil, ErrNoEntry
 	}
 	return s.resolve(ei)
 }

@@ -356,10 +356,10 @@ func TestNegotiateWalkMatchesRevlistObjects(t *testing.T) {
 
 	s := NewSearcher(bitmapIdx)
 	p := NewPacker(s, src, hash.New(crypto.SHA1))
-	want, have := benchBitmapMiss()
+	wants, haves := benchBitmapMiss()
 
 	// Bitmap path (walks graph until hitting a bitmap entry).
-	bm, err := p.Negotiate([]plumbing.Hash{want}, []plumbing.Hash{have})
+	bm, err := p.Negotiate(wants, haves)
 	require.NoError(t, err)
 
 	maxPos := uint32(src.ObjectCount())
@@ -372,7 +372,7 @@ func TestNegotiateWalkMatchesRevlistObjects(t *testing.T) {
 	}
 
 	// Graph-walk path.
-	revlistHashes, err := revlist.Objects(sto, []plumbing.Hash{want}, []plumbing.Hash{have})
+	revlistHashes, err := revlist.Objects(sto, wants, haves)
 	require.NoError(t, err)
 
 	revlistSet := make(map[string]struct{}, len(revlistHashes))
@@ -445,11 +445,28 @@ func benchWantHave(b *testing.B, idx *Index, src *testPackSource) (want, have pl
 }
 
 // benchBitmapMiss returns want/have hashes for commits that do NOT
-// have precomputed bitmap entries (~1 week apart: 2026-03-30 / 2026-03-23).
-func benchBitmapMiss() (want, have plumbing.Hash) {
-	want, _ = plumbing.FromHex("949b9bb475494424d72adf28a4ab312703611b7d")
-	have, _ = plumbing.FromHex("cbd7b1cdd118abbd188a8804767ef711e7e34bda")
-	return want, have
+// have precomputed bitmap entries. Simulates a client ~1 week behind
+// tracking several branches.
+//
+//	wants: 5 commits from 2026-03-28 to 2026-03-30
+//	haves: 5 commits from 2026-03-24
+func benchBitmapMiss() (wants, haves []plumbing.Hash) {
+	hex := func(s string) plumbing.Hash { h, _ := plumbing.FromHex(s); return h }
+	wants = []plumbing.Hash{
+		hex("949b9bb475494424d72adf28a4ab312703611b7d"),
+		hex("a7d9bf9aa32136dd22aba3c6ec218c6c7b27f475"),
+		hex("616469c3006bae526e37a9c349ee1ebe8c708b88"),
+		hex("91495350c82f8d3a5633354604e5f8e12be99a7f"),
+		hex("a93bccd59f82c947ede2c9d0e0062bc04e96c998"),
+	}
+	haves = []plumbing.Hash{
+		hex("cd85c8c75d344dfcc571c7e8897106a5e8622a58"),
+		hex("7002a0e5456172fa4d81a39996501146942e1ed9"),
+		hex("b1b844577fd751ad66e272426fc961494523f756"),
+		hex("a629a31674dd7da7bbfb2a18ab416ca6fec6c486"),
+		hex("772c1ee4f817aafd64544a9ac1180b2fe88ed29e"),
+	}
+	return wants, haves
 }
 
 func BenchmarkNegotiate(b *testing.B) {
@@ -473,14 +490,25 @@ func BenchmarkNegotiateWalk(b *testing.B) {
 	src := openPackSource(b)
 	s := NewSearcher(bitmapIdx)
 
-	// Non-bitmap commits ~1 week apart (2026-03-30 / 2026-03-23).
-	// The walk must traverse the graph until it hits a bitmap entry.
-	want, have := benchBitmapMiss()
+	wants, haves := benchBitmapMiss()
 
 	b.ResetTimer()
 	for b.Loop() {
 		p := NewPacker(s, src, hash.New(crypto.SHA1))
-		_, err := p.Negotiate([]plumbing.Hash{want}, []plumbing.Hash{have})
+		_, err := p.Negotiate(wants, haves)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRevlistObjectsWalk(b *testing.B) {
+	sto := openReadOnlyStorer(b)
+	wants, haves := benchBitmapMiss()
+
+	b.ResetTimer()
+	for b.Loop() {
+		_, err := revlist.Objects(sto, wants, haves)
 		if err != nil {
 			b.Fatal(err)
 		}
