@@ -48,6 +48,16 @@ func (b Bitmap) Get(pos uint32) bool {
 	return b[byteIdx]&(1<<bitIdx) != 0
 }
 
+// Set sets the bit at position pos.
+func (b Bitmap) Set(pos uint32) {
+	byteIdx := pos / 8
+	if byteIdx >= uint32(len(b)) {
+		return
+	}
+	bitIdx := 7 - (pos % 8)
+	b[byteIdx] |= 1 << bitIdx
+}
+
 // Bits returns the number of bits in the bitmap (always a multiple of 8).
 func (b Bitmap) Bits() uint32 {
 	return uint32(len(b)) * 8

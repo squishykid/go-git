@@ -3,6 +3,8 @@ module github.com/go-git/go-git/v6
 // go-git supports the last 3 stable Go versions.
 go 1.25.0
 
+replace github.com/go-git/go-git-fixtures/v6 => /Users/robin/Developer/go-git-fixtures
+
 require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/ProtonMail/go-crypto v1.4.1
