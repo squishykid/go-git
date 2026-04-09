@@ -65,7 +65,7 @@ func TestDecodeEWAH(t *testing.T) {
 	t.Run("fill then literal", func(t *testing.T) {
 		t.Parallel()
 		// 192 bits: RLW(k=2, l=1) → 128 zero bits + one literal word
-		literal := uint64(0xFF00000000000000) // first 8 bits set
+		literal := uint64(0x00000000000000FF) // bits 0-7 set (LSB-first)
 		data := encodeEWAH(192, []uint64{rlw(false, 2, 1), literal}, 0)
 		bm, err := DecodeEWAH(data)
 		require.NoError(t, err)
@@ -75,7 +75,7 @@ func TestDecodeEWAH(t *testing.T) {
 		for i := uint32(0); i < 128; i++ {
 			assert.False(t, bm.Get(i), "bit %d", i)
 		}
-		// Bits 128-135: set (from 0xFF byte)
+		// Bits 128-135: set (from literal bits 0-7)
 		for i := uint32(128); i < 136; i++ {
 			assert.True(t, bm.Get(i), "bit %d", i)
 		}
@@ -88,20 +88,20 @@ func TestDecodeEWAH(t *testing.T) {
 	t.Run("multiple RLWs", func(t *testing.T) {
 		t.Parallel()
 		// Two RLWs: first fills 64 zeros, second has 1 literal.
-		literal := uint64(0x0000000000000001) // bit 63 set
+		literal := uint64(0x0000000000000001) // bit 0 set (LSB-first)
 		data := encodeEWAH(128, []uint64{
 			rlw(false, 1, 0),            // 64 zero bits
-			rlw(false, 0, 1), literal, // 64 bits with bit 63 set
+			rlw(false, 0, 1), literal, // 64 bits with bit 0 set
 		}, 1)
 		bm, err := DecodeEWAH(data)
 		require.NoError(t, err)
 		assert.Equal(t, 16, len(bm))
 
-		for i := uint32(0); i < 63; i++ {
+		for i := uint32(1); i < 64; i++ {
 			assert.False(t, bm.Get(i), "bit %d", i)
 		}
-		assert.False(t, bm.Get(126))
-		assert.True(t, bm.Get(127))
+		assert.True(t, bm.Get(64))
+		assert.False(t, bm.Get(65))
 	})
 
 	t.Run("trailing data ignored", func(t *testing.T) {
@@ -150,16 +150,20 @@ func TestDecodeEWAH(t *testing.T) {
 func TestBitmapGet(t *testing.T) {
 	t.Parallel()
 
-	bm := Bitmap([]byte{0xA5}) // 1010 0101
-	assert.True(t, bm.Get(0))  // MSB
-	assert.False(t, bm.Get(1))
-	assert.True(t, bm.Get(2))
+	// Full 8-byte word. Bit positions use git's LSB-first convention:
+	// bit 0 = LSB of byte[7], bit 63 = MSB of byte[0].
+	bm := Bitmap([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xA5})
+	// byte[7] = 0xA5 = 1010_0101 → bits 0-7 of word
+	assert.True(t, bm.Get(0))  // bit 0 = byte[7] & 0x01 = 1
+	assert.False(t, bm.Get(1)) // bit 1 = byte[7] & 0x02 = 0
+	assert.True(t, bm.Get(2))  // bit 2 = byte[7] & 0x04 = 1
 	assert.False(t, bm.Get(3))
 	assert.False(t, bm.Get(4))
-	assert.True(t, bm.Get(5))
+	assert.True(t, bm.Get(5))  // bit 5 = byte[7] & 0x20 = 1
 	assert.False(t, bm.Get(6))
-	assert.True(t, bm.Get(7)) // LSB
-	assert.False(t, bm.Get(8)) // out of range
+	assert.True(t, bm.Get(7))  // bit 7 = byte[7] & 0x80 = 1
+	assert.False(t, bm.Get(8)) // bit 8 = byte[6] & 0x01 = 0
+	assert.False(t, bm.Get(64)) // out of range
 }
 
 func TestSetBitsIterator(t *testing.T) {
@@ -167,15 +171,16 @@ func TestSetBitsIterator(t *testing.T) {
 
 	t.Run("empty", func(t *testing.T) {
 		t.Parallel()
-		bm := Bitmap([]byte{0x00, 0x00})
+		bm := Bitmap(make([]byte, 8))
 		it := bm.SetBits()
 		_, ok := it.Next()
 		assert.False(t, ok)
 	})
 
-	t.Run("single byte", func(t *testing.T) {
+	t.Run("single word", func(t *testing.T) {
 		t.Parallel()
-		bm := Bitmap([]byte{0xA5}) // 1010 0101 → bits 0,2,5,7
+		// byte[7]=0xA5 → bits 0,2,5,7 set (LSB-first within word)
+		bm := Bitmap([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xA5})
 		it := bm.SetBits()
 
 		var got []uint32
@@ -185,28 +190,34 @@ func TestSetBitsIterator(t *testing.T) {
 		assert.Equal(t, []uint32{0, 2, 5, 7}, got)
 	})
 
-	t.Run("multi byte with gaps", func(t *testing.T) {
+	t.Run("two words with gap", func(t *testing.T) {
 		t.Parallel()
-		bm := Bitmap([]byte{0x80, 0x00, 0x01}) // bit 0, then zeros, then bit 23
-		it := bm.SetBits()
+		// Word 0: bit 0 set (byte[7] = 0x01)
+		// Word 1: bit 0 set (byte[15] = 0x01) → position 64
+		bm := Bitmap(make([]byte, 16))
+		bm[7] = 0x01
+		bm[15] = 0x01
 
+		it := bm.SetBits()
 		var got []uint32
 		for pos, ok := it.Next(); ok; pos, ok = it.Next() {
 			got = append(got, pos)
 		}
-		assert.Equal(t, []uint32{0, 23}, got)
+		assert.Equal(t, []uint32{0, 64}, got)
 	})
 
 	t.Run("all ones", func(t *testing.T) {
 		t.Parallel()
-		bm := Bitmap([]byte{0xFF})
+		bm := Bitmap([]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF})
 		it := bm.SetBits()
 
 		var got []uint32
 		for pos, ok := it.Next(); ok; pos, ok = it.Next() {
 			got = append(got, pos)
 		}
-		assert.Equal(t, []uint32{0, 1, 2, 3, 4, 5, 6, 7}, got)
+		assert.Len(t, got, 64)
+		assert.Equal(t, uint32(0), got[0])
+		assert.Equal(t, uint32(63), got[63])
 	})
 }
 
@@ -216,7 +227,8 @@ func rlw(fill bool, k uint32, l uint32) uint64 {
 	if fill {
 		b = 1
 	}
-	return b<<63 | uint64(k)<<31 | uint64(l)
+	// JGit layout: bit 0 = fill, bits 1-32 = k, bits 33-63 = l
+	return b | uint64(k)<<1 | uint64(l)<<33
 }
 
 // encodeEWAH builds the on-disk EWAH representation.

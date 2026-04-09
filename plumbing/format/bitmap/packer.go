@@ -13,15 +13,20 @@ import (
 )
 
 // PackSource provides access to objects in the source packfile.
+//
+// Bitmap entries reference two position spaces:
+//   - idx position: hash-sorted order (Entry.ObjectPosition, used by Searcher)
+//   - pack-offset position: order objects appear in the .pack file
+//     (used by type and reachability bitmaps)
 type PackSource interface {
 	// ObjectCount returns the total number of objects in the pack.
 	ObjectCount() int
-	// FindPosition returns the pack index position for the given hash,
-	// or false if the hash is not in the pack.
-	FindPosition(h plumbing.Hash) (uint32, bool)
-	// Object returns the encoded object at the given pack index position.
+	// FindPosition returns both the idx position and pack-offset position
+	// for the given hash, or false if the hash is not in the pack.
+	FindPosition(h plumbing.Hash) (idxPos, packPos uint32, ok bool)
+	// Object returns the encoded object at the given pack-offset position.
 	// The returned object must have resolved (non-delta) content.
-	Object(idxPos uint32) (plumbing.EncodedObject, error)
+	Object(packPos uint32) (plumbing.EncodedObject, error)
 }
 
 // Packer uses bitmap reachability data to efficiently build a packfile
@@ -105,13 +110,14 @@ func (p *Packer) Reachability(hashes []plumbing.Hash) (Bitmap, error) {
 		}
 		visited[h] = struct{}{}
 
-		pos, ok := p.source.FindPosition(h)
+		idxPos, packPos, ok := p.source.FindPosition(h)
 		if !ok {
 			continue
 		}
 
 		// Fast path: use precomputed bitmap when available.
-		reachBm, err := p.searcher.Reachable(pos)
+		// Searcher is keyed by idx position (Entry.ObjectPosition).
+		reachBm, err := p.searcher.Reachable(idxPos)
 		if err == nil {
 			bm.Or(reachBm)
 			continue
@@ -121,9 +127,10 @@ func (p *Packer) Reachability(hashes []plumbing.Hash) (Bitmap, error) {
 		}
 
 		// No precomputed bitmap — mark this object and enqueue children.
-		bm.Set(pos)
+		// Bitmap bits use pack-offset position.
+		bm.Set(packPos)
 
-		obj, err := p.source.Object(pos)
+		obj, err := p.source.Object(packPos)
 		if err != nil {
 			return nil, err
 		}

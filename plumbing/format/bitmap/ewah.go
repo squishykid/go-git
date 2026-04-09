@@ -39,23 +39,27 @@ func (b EWAH) Size() int {
 type Bitmap []byte
 
 // Get returns the value of the bit at position pos.
+// Bit numbering follows the git pack-bitmap convention: within each
+// 64-bit word (stored big-endian) bit 0 is the least-significant bit.
 func (b Bitmap) Get(pos uint32) bool {
-	byteIdx := pos / 8
+	wordIdx := pos / 64
+	bitInWord := pos % 64
+	byteIdx := wordIdx*8 + 7 - bitInWord/8
 	if byteIdx >= uint32(len(b)) {
 		return false
 	}
-	bitIdx := 7 - (pos % 8)
-	return b[byteIdx]&(1<<bitIdx) != 0
+	return b[byteIdx]&(1<<(bitInWord%8)) != 0
 }
 
 // Set sets the bit at position pos.
 func (b Bitmap) Set(pos uint32) {
-	byteIdx := pos / 8
+	wordIdx := pos / 64
+	bitInWord := pos % 64
+	byteIdx := wordIdx*8 + 7 - bitInWord/8
 	if byteIdx >= uint32(len(b)) {
 		return
 	}
-	bitIdx := 7 - (pos % 8)
-	b[byteIdx] |= 1 << bitIdx
+	b[byteIdx] |= 1 << (bitInWord % 8)
 }
 
 // Bits returns the number of bits in the bitmap (always a multiple of 8).
@@ -109,12 +113,12 @@ func (b Bitmap) Xor(other Bitmap) {
 	}
 }
 
-// SetBitsIterator iterates over the indices of set bits in a Bitmap.
+// SetBitsIterator iterates over the indices of set bits in a Bitmap
+// in ascending bit-position order (git's LSB-first word convention).
 type SetBitsIterator struct {
-	b   Bitmap
-	pos uint32 // current byte index
-	bit uint8  // next bit to check within current byte (7 = MSB, 0 = LSB)
-	rem byte   // remaining bits in current byte (masked copy)
+	b    Bitmap
+	word uint32 // current word index
+	rem  uint64 // remaining bits in current word
 }
 
 // SetBits returns an iterator over the indices of all set bits.
@@ -127,39 +131,46 @@ func (b Bitmap) SetBits() *SetBitsIterator {
 // Next returns the index of the next set bit and true, or (0, false)
 // when there are no more set bits.
 func (it *SetBitsIterator) Next() (uint32, bool) {
-	for it.rem != 0 {
-		bit := it.bit
-		mask := byte(1 << bit)
-		if it.rem&mask != 0 {
-			it.rem &^= mask
-			pos := it.pos*8 + uint32(7-bit)
+	for {
+		if it.rem != 0 {
+			bit := trailingZeros64(it.rem)
+			it.rem &= it.rem - 1 // clear lowest set bit
+			pos := it.word*64 + uint32(bit)
 			if it.rem == 0 {
-				it.pos++
+				it.word++
 				it.advance()
 			}
 			return pos, true
 		}
-		if bit == 0 {
-			it.pos++
-			it.advance()
-		} else {
-			it.bit--
-		}
+		return 0, false
 	}
-	return 0, false
 }
 
-// advance skips zero bytes to find the next byte with set bits.
+// advance loads the next non-zero word.
 func (it *SetBitsIterator) advance() {
-	for it.pos < uint32(len(it.b)) {
-		if it.b[it.pos] != 0 {
-			it.rem = it.b[it.pos]
-			it.bit = 7
+	nWords := uint32(len(it.b)) / 8
+	for it.word < nWords {
+		w := binary.BigEndian.Uint64(it.b[it.word*8:])
+		if w != 0 {
+			it.rem = w
 			return
 		}
-		it.pos++
+		it.word++
 	}
 	it.rem = 0
+}
+
+// trailingZeros64 returns the number of trailing zero bits in x.
+func trailingZeros64(x uint64) uint32 {
+	if x == 0 {
+		return 64
+	}
+	n := uint32(0)
+	for x&1 == 0 {
+		n++
+		x >>= 1
+	}
+	return n
 }
 
 // DecodeEWAH decompresses an EWAH-encoded bitmap into a flat Bitmap.
@@ -192,9 +203,13 @@ func DecodeEWAH(data EWAH) (Bitmap, error) {
 		rlw := binary.BigEndian.Uint64(data[compBase+int(compIdx)*8:])
 		compIdx++
 
-		fillBit := rlw >> 63
-		k := uint32((rlw >> 31) & 0xFFFFFFFF)
-		l := uint32(rlw & 0x7FFFFFFF)
+		// RLW layout (JGit convention):
+		//   bit 0:     fill bit (running bit)
+		//   bits 1-32: k (running length, 32 bits)
+		//   bits 33-63: l (literal count, 31 bits)
+		fillBit := rlw & 1
+		k := uint32((rlw >> 1) & 0xFFFFFFFF)
+		l := uint32(rlw >> 33)
 
 		if fillBit != 0 {
 			for j := uint32(0); j < k && outWord < nWords; j++ {

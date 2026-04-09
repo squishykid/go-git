@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"testing"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/format/idxfile"
 	"github.com/go-git/go-git/v6/plumbing/format/packfile"
 	"github.com/go-git/go-git/v6/plumbing/hash"
+	"github.com/go-git/go-git/v6/plumbing/revlist"
+	"github.com/go-git/go-git/v6/plumbing/storer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -35,16 +38,20 @@ func (s *testPackSource) ObjectCount() int {
 	return len(s.offsetToIdx)
 }
 
-func (s *testPackSource) FindPosition(h plumbing.Hash) (uint32, bool) {
-	pos, ok := s.hashToOffset[h]
-	return pos, ok
+func (s *testPackSource) FindPosition(h plumbing.Hash) (idxPos, packPos uint32, ok bool) {
+	packPos, ok = s.hashToOffset[h]
+	if !ok {
+		return 0, 0, false
+	}
+	idxPos = s.offsetToIdx[packPos]
+	return idxPos, packPos, true
 }
 
-func (s *testPackSource) Object(offsetPos uint32) (plumbing.EncodedObject, error) {
-	if int(offsetPos) >= len(s.offsetToIdx) {
+func (s *testPackSource) Object(packPos uint32) (plumbing.EncodedObject, error) {
+	if int(packPos) >= len(s.offsetToIdx) {
 		return nil, plumbing.ErrObjectNotFound
 	}
-	idxPos := s.offsetToIdx[offsetPos]
+	idxPos := s.offsetToIdx[packPos]
 	return s.pf.Get(s.idxToHash[idxPos])
 }
 
@@ -89,15 +96,15 @@ func openPackSource(t testing.TB) *testPackSource {
 	offsetToIdx := make([]uint32, n)
 	idxToOffset := make([]uint32, n)
 	for i := 0; i < n; i++ {
-		idxPos := binary.BigEndian.Uint32(revData[revFileHeader+i*4:])
-		offsetToIdx[i] = idxPos
-		idxToOffset[idxPos] = uint32(i)
+		ip := binary.BigEndian.Uint32(revData[revFileHeader+i*4:])
+		offsetToIdx[i] = ip
+		idxToOffset[ip] = uint32(i)
 	}
 
 	// Build hash → pack-offset-position table.
 	hashToOffset := make(map[plumbing.Hash]uint32, n)
-	for idxPos, h := range idxToHash {
-		hashToOffset[h] = idxToOffset[idxPos]
+	for ip, h := range idxToHash {
+		hashToOffset[h] = idxToOffset[ip]
 	}
 
 	// Open pack file.
@@ -119,8 +126,13 @@ func openPackSource(t testing.TB) *testPackSource {
 }
 
 // hashAtOffset returns the object hash at the given pack-offset position.
-func (s *testPackSource) hashAtOffset(offsetPos uint32) plumbing.Hash {
-	return s.idxToHash[s.offsetToIdx[offsetPos]]
+func (s *testPackSource) hashAtOffset(packPos uint32) plumbing.Hash {
+	return s.idxToHash[s.offsetToIdx[packPos]]
+}
+
+// hashAtIdx returns the object hash at the given idx (hash-sorted) position.
+func (s *testPackSource) hashAtIdx(idxPos uint32) plumbing.Hash {
+	return s.idxToHash[idxPos]
 }
 
 func TestPackerNegotiateWalk(t *testing.T) {
@@ -181,7 +193,7 @@ func TestPackerNegotiate(t *testing.T) {
 	p := NewPacker(s, src, hash.New(crypto.SHA1))
 
 	e0 := bitmapIdx.Entry(0)
-	h0 := src.hashAtOffset(e0.ObjectPosition)
+	h0 := src.hashAtIdx(e0.ObjectPosition)
 
 	bm, err := p.Negotiate([]plumbing.Hash{h0}, nil)
 	require.NoError(t, err)
@@ -202,7 +214,7 @@ func TestPackerNegotiateWithHaves(t *testing.T) {
 	p := NewPacker(s, src, hash.New(crypto.SHA1))
 
 	e0 := bitmapIdx.Entry(0)
-	h0 := src.hashAtOffset(e0.ObjectPosition)
+	h0 := src.hashAtIdx(e0.ObjectPosition)
 
 	// When want == have, the result bitmap should have no set bits.
 	bm, err := p.Negotiate([]plumbing.Hash{h0}, []plumbing.Hash{h0})
@@ -225,7 +237,7 @@ func TestPackerPack(t *testing.T) {
 	p := NewPacker(s, src, hash.New(crypto.SHA1))
 
 	e0 := bitmapIdx.Entry(0)
-	h0 := src.hashAtOffset(e0.ObjectPosition)
+	h0 := src.hashAtIdx(e0.ObjectPosition)
 
 	var buf bytes.Buffer
 	checksum, err := p.Pack(&buf, []plumbing.Hash{h0}, nil)
@@ -255,9 +267,9 @@ func TestPackerPackWithHaves(t *testing.T) {
 	p := NewPacker(s, src, hash.New(crypto.SHA1))
 
 	e0 := bitmapIdx.Entry(0)
-	h0 := src.hashAtOffset(e0.ObjectPosition)
+	h0 := src.hashAtIdx(e0.ObjectPosition)
 	e1 := bitmapIdx.Entry(1)
-	h1 := src.hashAtOffset(e1.ObjectPosition)
+	h1 := src.hashAtIdx(e1.ObjectPosition)
 
 	var buf1 bytes.Buffer
 	_, err := p.Pack(&buf1, []plumbing.Hash{h0}, nil)
@@ -271,4 +283,151 @@ func TestPackerPackWithHaves(t *testing.T) {
 
 	// Providing haves should reduce the object count.
 	assert.Less(t, countWith, countWithout)
+}
+
+func openReadOnlyStorer(t testing.TB) *readOnlyStorer {
+	t.Helper()
+	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
+	idxFile, err := q.Idx()
+	require.NoError(t, err)
+	defer idxFile.Close()
+	idx := idxfile.NewMemoryIndex(crypto.SHA1.Size())
+	require.NoError(t, idxfile.NewDecoder(idxFile, hash.New(crypto.SHA1)).Decode(idx))
+
+	packFile, err := q.Packfile()
+	require.NoError(t, err)
+	pf := packfile.NewPackfile(packFile,
+		packfile.WithIdx(idx),
+		packfile.WithFs(osfs.New(t.TempDir())),
+	)
+	t.Cleanup(func() { pf.Close() })
+	return &readOnlyStorer{pf: pf}
+}
+
+func TestNegotiateMatchesRevlistObjects(t *testing.T) {
+	t.Parallel()
+
+	bitmapIdx := openFixture(t)
+	src := openPackSource(t)
+	sto := openReadOnlyStorer(t)
+
+	s := NewSearcher(bitmapIdx)
+	p := NewPacker(s, src, hash.New(crypto.SHA1))
+
+	e0 := bitmapIdx.Entry(0)
+	want := src.hashAtIdx(e0.ObjectPosition)
+
+	// Bitmap path.
+	bm, err := p.Negotiate([]plumbing.Hash{want}, nil)
+	require.NoError(t, err)
+
+	maxPos := uint32(src.ObjectCount())
+	bitmapSet := make(map[string]struct{})
+	it := bm.SetBits()
+	for pos, ok := it.Next(); ok; pos, ok = it.Next() {
+		if pos < maxPos {
+			bitmapSet[src.hashAtOffset(pos).String()] = struct{}{}
+		}
+	}
+
+	// Graph-walk path.
+	revlistHashes, err := revlist.Objects(sto, []plumbing.Hash{want}, nil)
+	require.NoError(t, err)
+
+	revlistSet := make(map[string]struct{}, len(revlistHashes))
+	for _, h := range revlistHashes {
+		revlistSet[h.String()] = struct{}{}
+	}
+
+	t.Logf("both produced %d objects", len(bitmapSet))
+	assert.Equal(t, len(revlistSet), len(bitmapSet))
+
+	for h := range revlistSet {
+		assert.Contains(t, bitmapSet, h, "revlist object missing from bitmap result")
+	}
+}
+
+// readOnlyStorer wraps a packfile.Packfile to satisfy
+// storer.EncodedObjectStorer for read-only benchmarking.
+type readOnlyStorer struct{ pf *packfile.Packfile }
+
+func (s *readOnlyStorer) EncodedObject(t plumbing.ObjectType, h plumbing.Hash) (plumbing.EncodedObject, error) {
+	obj, err := s.pf.Get(h)
+	if err != nil {
+		return nil, err
+	}
+	if t != plumbing.AnyObject && obj.Type() != t {
+		return nil, plumbing.ErrObjectNotFound
+	}
+	return obj, nil
+}
+
+func (s *readOnlyStorer) IterEncodedObjects(t plumbing.ObjectType) (storer.EncodedObjectIter, error) {
+	return s.pf.GetByType(t)
+}
+
+func (s *readOnlyStorer) HasEncodedObject(h plumbing.Hash) error {
+	_, err := s.pf.Get(h)
+	return err
+}
+
+func (s *readOnlyStorer) EncodedObjectSize(h plumbing.Hash) (int64, error) {
+	obj, err := s.pf.Get(h)
+	if err != nil {
+		return 0, err
+	}
+	return obj.Size(), nil
+}
+
+func (s *readOnlyStorer) NewEncodedObject() plumbing.EncodedObject {
+	return &plumbing.MemoryObject{}
+}
+
+func (s *readOnlyStorer) SetEncodedObject(plumbing.EncodedObject) (plumbing.Hash, error) {
+	return plumbing.ZeroHash, fmt.Errorf("read-only")
+}
+
+func (s *readOnlyStorer) RawObjectWriter(plumbing.ObjectType, int64) (io.WriteCloser, error) {
+	return nil, fmt.Errorf("read-only")
+}
+
+func (s *readOnlyStorer) AddAlternate(string) error { return nil }
+
+func BenchmarkNegotiate(b *testing.B) {
+	bitmapIdx := openFixture(b)
+	src := openPackSource(b)
+	s := NewSearcher(bitmapIdx)
+
+	e0 := bitmapIdx.Entry(0)
+	want := src.hashAtIdx(e0.ObjectPosition)
+	e1 := bitmapIdx.Entry(1)
+	have := src.hashAtIdx(e1.ObjectPosition)
+
+	b.ResetTimer()
+	for b.Loop() {
+		p := NewPacker(s, src, hash.New(crypto.SHA1))
+		_, err := p.Negotiate([]plumbing.Hash{want}, []plumbing.Hash{have})
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRevlistObjects(b *testing.B) {
+	bitmapIdx := openFixture(b)
+	src := openPackSource(b)
+	sto := openReadOnlyStorer(b)
+
+	e0 := bitmapIdx.Entry(0)
+	want := src.hashAtIdx(e0.ObjectPosition)
+	e1 := bitmapIdx.Entry(1)
+	have := src.hashAtIdx(e1.ObjectPosition)
+
+	b.ResetTimer()
+	for b.Loop() {
+		_, err := revlist.Objects(sto, []plumbing.Hash{want}, []plumbing.Hash{have})
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
 }
