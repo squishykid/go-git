@@ -347,6 +347,47 @@ func TestNegotiateMatchesRevlistObjects(t *testing.T) {
 	}
 }
 
+func TestNegotiateWalkMatchesRevlistObjects(t *testing.T) {
+	t.Parallel()
+
+	bitmapIdx := openFixture(t)
+	src := openPackSource(t)
+	sto := openReadOnlyStorer(t)
+
+	s := NewSearcher(bitmapIdx)
+	p := NewPacker(s, src, hash.New(crypto.SHA1))
+	want, have := benchBitmapMiss()
+
+	// Bitmap path (walks graph until hitting a bitmap entry).
+	bm, err := p.Negotiate([]plumbing.Hash{want}, []plumbing.Hash{have})
+	require.NoError(t, err)
+
+	maxPos := uint32(src.ObjectCount())
+	bitmapSet := make(map[string]struct{})
+	it := bm.SetBits()
+	for pos, ok := it.Next(); ok; pos, ok = it.Next() {
+		if pos < maxPos {
+			bitmapSet[src.hashAtOffset(pos).String()] = struct{}{}
+		}
+	}
+
+	// Graph-walk path.
+	revlistHashes, err := revlist.Objects(sto, []plumbing.Hash{want}, []plumbing.Hash{have})
+	require.NoError(t, err)
+
+	revlistSet := make(map[string]struct{}, len(revlistHashes))
+	for _, h := range revlistHashes {
+		revlistSet[h.String()] = struct{}{}
+	}
+
+	t.Logf("bitmap: %d objects, revlist: %d objects", len(bitmapSet), len(revlistSet))
+
+	// The bitmap result must contain every object revlist found.
+	for h := range revlistSet {
+		assert.Contains(t, bitmapSet, h, "revlist object missing from bitmap result")
+	}
+}
+
 // readOnlyStorer wraps a packfile.Packfile to satisfy
 // storer.EncodedObjectStorer for read-only benchmarking.
 type readOnlyStorer struct{ pf *packfile.Packfile }
@@ -393,15 +434,48 @@ func (s *readOnlyStorer) RawObjectWriter(plumbing.ObjectType, int64) (io.WriteCl
 
 func (s *readOnlyStorer) AddAlternate(string) error { return nil }
 
+// benchWantHave returns want/have hashes for a client ~1 week behind.
+// Entry 0 is the newest commit (2026-04-08), entry 77 is ~7 days
+// earlier (2026-04-01).
+func benchWantHave(b *testing.B, idx *Index, src *testPackSource) (want, have plumbing.Hash) {
+	b.Helper()
+	want = src.hashAtIdx(idx.Entry(0).ObjectPosition)
+	have = src.hashAtIdx(idx.Entry(77).ObjectPosition)
+	return want, have
+}
+
+// benchBitmapMiss returns want/have hashes for commits that do NOT
+// have precomputed bitmap entries (~1 week apart: 2026-03-30 / 2026-03-23).
+func benchBitmapMiss() (want, have plumbing.Hash) {
+	want, _ = plumbing.FromHex("949b9bb475494424d72adf28a4ab312703611b7d")
+	have, _ = plumbing.FromHex("cbd7b1cdd118abbd188a8804767ef711e7e34bda")
+	return want, have
+}
+
 func BenchmarkNegotiate(b *testing.B) {
 	bitmapIdx := openFixture(b)
 	src := openPackSource(b)
 	s := NewSearcher(bitmapIdx)
+	want, have := benchWantHave(b, bitmapIdx, src)
 
-	e0 := bitmapIdx.Entry(0)
-	want := src.hashAtIdx(e0.ObjectPosition)
-	e1 := bitmapIdx.Entry(1)
-	have := src.hashAtIdx(e1.ObjectPosition)
+	b.ResetTimer()
+	for b.Loop() {
+		p := NewPacker(s, src, hash.New(crypto.SHA1))
+		_, err := p.Negotiate([]plumbing.Hash{want}, []plumbing.Hash{have})
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkNegotiateWalk(b *testing.B) {
+	bitmapIdx := openFixture(b)
+	src := openPackSource(b)
+	s := NewSearcher(bitmapIdx)
+
+	// Non-bitmap commits ~1 week apart (2026-03-30 / 2026-03-23).
+	// The walk must traverse the graph until it hits a bitmap entry.
+	want, have := benchBitmapMiss()
 
 	b.ResetTimer()
 	for b.Loop() {
@@ -417,11 +491,7 @@ func BenchmarkRevlistObjects(b *testing.B) {
 	bitmapIdx := openFixture(b)
 	src := openPackSource(b)
 	sto := openReadOnlyStorer(b)
-
-	e0 := bitmapIdx.Entry(0)
-	want := src.hashAtIdx(e0.ObjectPosition)
-	e1 := bitmapIdx.Entry(1)
-	have := src.hashAtIdx(e1.ObjectPosition)
+	want, have := benchWantHave(b, bitmapIdx, src)
 
 	b.ResetTimer()
 	for b.Loop() {
