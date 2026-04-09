@@ -55,27 +55,48 @@ func (s *Searcher) resolve(ordinal int) (Bitmap, error) {
 		return bm, nil
 	}
 
-	e := s.idx.Entry(ordinal)
-	bm, err := DecodeEWAH(e.Bitmap)
-	if err != nil {
-		return nil, fmt.Errorf("decompressing entry %d: %w", ordinal, err)
-	}
+	// Walk backwards through the XOR chain to find the first entry
+	// that is either already cached or has no XOR dependency.
+	var chain []int
+	for cur := ordinal; ; {
+		if s.cache[cur] != nil {
+			break
+		}
+		chain = append(chain, cur)
 
-	if e.XOROffset > 0 {
-		base := ordinal - int(e.XOROffset)
+		e := s.idx.Entry(cur)
+		if e.XOROffset == 0 {
+			break
+		}
+		base := cur - int(e.XOROffset)
 		if base < 0 {
 			return nil, fmt.Errorf("%w: entry %d references offset %d",
-				ErrInvalidXOROffset, ordinal, e.XOROffset)
+				ErrInvalidXOROffset, cur, e.XOROffset)
 		}
-		baseBm, err := s.resolve(base)
-		if err != nil {
-			return nil, err
-		}
-		bm.Xor(baseBm)
+		cur = base
 	}
 
-	s.cache[ordinal] = bm
-	return bm, nil
+	// Walk the chain forwards, decompressing and XOR-resolving each
+	// entry against the previous one.
+	for i := len(chain) - 1; i >= 0; i-- {
+		cur := chain[i]
+		e := s.idx.Entry(cur)
+
+		bm, err := DecodeEWAH(e.Bitmap)
+		if err != nil {
+			return nil, fmt.Errorf("decompressing entry %d: %w", cur, err)
+		}
+
+		if e.XOROffset > 0 {
+			base := cur - int(e.XOROffset)
+			bm = Extend(bm, s.cache[base])
+			bm.Xor(s.cache[base])
+		}
+
+		s.cache[cur] = bm
+	}
+
+	return s.cache[ordinal], nil
 }
 
 // ReachableCommits returns an iterator over the pack index positions of
