@@ -35,73 +35,85 @@ const headerFixedSize = 12
 // it suitable for use with memory-mapped files.
 //
 // Use [Open] to validate and create an Index from raw bytes.
-type Index []byte
+type Index struct {
+	b        []byte
+	hashSize int
+	// entryOffsets[i] is the byte offset into b where the i-th
+	// per-commit entry begins (at the 4-byte ObjectPosition field).
+	// Built once during [Open].
+	entryOffsets []uint32
+}
 
 // Version returns the bitmap index version.
 func (idx Index) Version() uint16 {
-	return binary.BigEndian.Uint16(idx[4:6])
+	return binary.BigEndian.Uint16(idx.b[4:6])
 }
 
 // Flags returns the option flags.
 func (idx Index) Flags() uint16 {
-	return binary.BigEndian.Uint16(idx[6:8])
+	return binary.BigEndian.Uint16(idx.b[6:8])
 }
 
 // EntryCount returns the number of per-commit bitmap entries.
 func (idx Index) EntryCount() uint32 {
-	return binary.BigEndian.Uint32(idx[8:12])
+	return binary.BigEndian.Uint32(idx.b[8:12])
 }
 
 // PackChecksum returns the raw pack checksum bytes from the header.
-func (idx Index) PackChecksum(hashSize int) []byte {
-	return idx[headerFixedSize : headerFixedSize+hashSize]
+func (idx Index) PackChecksum() []byte {
+	return idx.b[headerFixedSize : headerFixedSize+idx.hashSize]
 }
 
 // Commits returns the EWAH-compressed type bitmap for commits.
-func (idx Index) Commits(hashSize int) EWAH {
-	return idx.typeBitmap(hashSize, 0)
+func (idx Index) Commits() EWAH {
+	return idx.typeBitmap(0)
 }
 
 // Trees returns the EWAH-compressed type bitmap for trees.
-func (idx Index) Trees(hashSize int) EWAH {
-	return idx.typeBitmap(hashSize, 1)
+func (idx Index) Trees() EWAH {
+	return idx.typeBitmap(1)
 }
 
 // Blobs returns the EWAH-compressed type bitmap for blobs.
-func (idx Index) Blobs(hashSize int) EWAH {
-	return idx.typeBitmap(hashSize, 2)
+func (idx Index) Blobs() EWAH {
+	return idx.typeBitmap(2)
 }
 
 // Tags returns the EWAH-compressed type bitmap for tags.
-func (idx Index) Tags(hashSize int) EWAH {
-	return idx.typeBitmap(hashSize, 3)
+func (idx Index) Tags() EWAH {
+	return idx.typeBitmap(3)
 }
 
 // typeBitmap returns the i-th type bitmap (0=commits, 1=trees, 2=blobs, 3=tags).
-func (idx Index) typeBitmap(hashSize int, i int) EWAH {
-	off := headerFixedSize + hashSize
+func (idx Index) typeBitmap(i int) EWAH {
+	off := headerFixedSize + idx.hashSize
 	for j := 0; j < i; j++ {
-		off += EWAH(idx[off:]).Size()
+		off += EWAH(idx.b[off:]).Size()
 	}
-	return EWAH(idx[off:])
+	return EWAH(idx.b[off:])
 }
 
-// entriesOffset returns the byte offset where the per-commit entries begin.
-func (idx Index) entriesOffset(hashSize int) int {
-	off := headerFixedSize + hashSize
+// Entry returns the i-th per-commit bitmap entry. The offset is
+// looked up from the table built during [Open], so this is O(1).
+func (idx Index) Entry(i int) Entry {
+	return parseEntry(idx.b[idx.entryOffsets[i]:])
+}
+
+// buildEntryOffsets scans the variable-length entries once and records
+// the byte offset of each entry. Called during [Open].
+func (idx *Index) buildEntryOffsets() {
+	n := int(idx.EntryCount())
+	idx.entryOffsets = make([]uint32, n)
+
+	off := headerFixedSize + idx.hashSize
 	for range 4 {
-		off += EWAH(idx[off:]).Size()
+		off += EWAH(idx.b[off:]).Size()
 	}
-	return off
-}
 
-// Entry returns the i-th per-commit bitmap entry.
-func (idx Index) Entry(hashSize int, i int) Entry {
-	off := idx.entriesOffset(hashSize)
-	for j := 0; j < i; j++ {
-		off += entrySize(idx[off:])
+	for i := range n {
+		idx.entryOffsets[i] = uint32(off)
+		off += entrySize(idx.b[off:])
 	}
-	return parseEntry(idx[off:])
 }
 
 // entryHeaderSize is the fixed portion of each entry before the EWAH bitmap.
@@ -137,19 +149,19 @@ type Entry struct {
 
 // NameHashCache returns the name-hash cache values. Returns nil if the
 // OptHashCache flag is not set. Each value is a 4-byte big-endian uint32.
-func (idx Index) NameHashCache(hashSize int) []byte {
+func (idx Index) NameHashCache() []byte {
 	if idx.Flags()&OptHashCache == 0 {
 		return nil
 	}
-	off := idx.entriesOffset(hashSize)
-	n := int(idx.EntryCount())
-	for i := 0; i < n; i++ {
-		off += entrySize(idx[off:])
+	n := len(idx.entryOffsets)
+	if n == 0 {
+		return nil
 	}
-	// The hash cache runs from off to len(idx) - hashSize (trailing checksum).
-	end := len(idx) - hashSize
+	// The hash cache starts right after the last entry.
+	off := int(idx.entryOffsets[n-1]) + entrySize(idx.b[idx.entryOffsets[n-1]:])
+	end := len(idx.b) - idx.hashSize
 	if off >= end {
 		return nil
 	}
-	return idx[off:end]
+	return idx.b[off:end]
 }

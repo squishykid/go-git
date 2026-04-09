@@ -24,9 +24,8 @@ type PackIndex interface {
 // Searcher provides object reachability lookups using a bitmap index
 // combined with a pack index.
 type Searcher struct {
-	idx      Index
-	hashSize int
-	pack     PackIndex
+	idx  Index
+	pack PackIndex
 
 	// entryIndex maps ObjectPosition (idx position) to the entry
 	// ordinal in the bitmap file.
@@ -37,19 +36,15 @@ type Searcher struct {
 }
 
 // NewSearcher builds a Searcher from a bitmap Index and a PackIndex.
-func NewSearcher(bitmapIdx Index, hashSize int, pack PackIndex) *Searcher {
+func NewSearcher(bitmapIdx Index, pack PackIndex) *Searcher {
 	entryCount := int(bitmapIdx.EntryCount())
 	entryIndex := make(map[uint32]int, entryCount)
-	off := bitmapIdx.entriesOffset(hashSize)
 	for i := range entryCount {
-		e := parseEntry(bitmapIdx[off:])
-		entryIndex[e.ObjectPosition] = i
-		off += entrySize(bitmapIdx[off:])
+		entryIndex[bitmapIdx.Entry(i).ObjectPosition] = i
 	}
 
 	return &Searcher{
 		idx:        bitmapIdx,
-		hashSize:   hashSize,
 		pack:       pack,
 		entryIndex: entryIndex,
 		cache:      make([]Bitmap, entryCount),
@@ -106,7 +101,7 @@ func (s *Searcher) resolve(ordinal int) (Bitmap, error) {
 		return bm, nil
 	}
 
-	e := s.idx.Entry(s.hashSize, ordinal)
+	e := s.idx.Entry(ordinal)
 	bm, err := DecodeEWAH(e.Bitmap)
 	if err != nil {
 		return nil, fmt.Errorf("decompressing entry %d: %w", ordinal, err)
