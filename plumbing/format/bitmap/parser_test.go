@@ -103,6 +103,29 @@ func BenchmarkDecode(b *testing.B) {
 	}
 }
 
+func BenchmarkDecodeEWAH(b *testing.B) {
+	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
+
+	f, err := q.Bitmap()
+	require.NoError(b, err)
+	defer f.Close()
+
+	h := hash.New(crypto.SHA1)
+	var idx Index
+	require.NoError(b, NewDecoder(f, h).Decode(&idx))
+	require.GreaterOrEqual(b, len(idx.Entries), 100)
+
+	b.ResetTimer()
+	for b.Loop() {
+		for _, data := range idx.Entries {
+			_, err := DecodeEWAH(data.Bitmap)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
 func loadSearcherFixture(t *testing.T) (*Index, *Searcher, []plumbing.Hash) {
 	t.Helper()
 	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()

@@ -86,7 +86,7 @@ func DecodeEWAH(data BitmapEWAH) (Bitmap, error) {
 			outWord += min(k, nWords-outWord)
 		}
 
-		for j := uint32(0); j < l && outWord < nWords; j++ {
+		for j := uint32(0); j < l && outWord < nWords && compIdx < wordCount; j++ {
 			w := binary.BigEndian.Uint64(data[compBase+int(compIdx)*8:])
 			compIdx++
 			writeWord(out, outWord, w)
