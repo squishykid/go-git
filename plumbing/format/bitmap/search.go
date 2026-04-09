@@ -2,22 +2,31 @@ package bitmap
 
 import (
 	"fmt"
-	"io"
 
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/format/idxfile"
 )
 
+// PackIndex provides the pack metadata needed by the Searcher to map
+// bitmap bit positions to object hashes. Implementations must support
+// lookup by both idx position (sorted hash order) and pack-offset
+// position (reverse index order).
+type PackIndex interface {
+	// ObjectCount returns the total number of objects in the pack.
+	ObjectCount() int
+	// ObjectID returns the object hash at the given idx position
+	// (sorted hash order, 0-indexed).
+	ObjectID(idxPos int) plumbing.Hash
+	// IdxPositionAtOffset returns the idx position of the object at
+	// the given pack-offset position (reverse index order, 0-indexed).
+	IdxPositionAtOffset(packPos int) int
+}
+
 // Searcher provides object reachability lookups using a bitmap index
-// combined with a pack index and reverse index.
+// combined with a pack index.
 type Searcher struct {
 	idx      Index
 	hashSize int
-
-	// packOrderHashes maps pack-offset position to object hash.
-	packOrderHashes []plumbing.Hash
-	// hashToIdxPos maps object hash to its pack index position.
-	hashToIdxPos map[plumbing.Hash]uint32
+	pack     PackIndex
 
 	// entryIndex maps ObjectPosition (idx position) to the entry
 	// ordinal in the bitmap file.
@@ -27,44 +36,8 @@ type Searcher struct {
 	cache []Bitmap
 }
 
-// NewSearcher builds a Searcher by combining a decoded bitmap Index with
-// the corresponding pack Index and reverse index.
-//
-// packOrder maps pack-offset position to pack index position, as
-// decoded from the reverse index (.rev) file. It must have one entry
-// per object in the pack.
-func NewSearcher(bitmapIdx Index, hashSize int, packIdx idxfile.Index, packOrder []uint32) (*Searcher, error) {
-	count, err := packIdx.Count()
-	if err != nil {
-		return nil, fmt.Errorf("reading pack index count: %w", err)
-	}
-
-	idxHashes := make([]plumbing.Hash, 0, count)
-	hashToIdxPos := make(map[plumbing.Hash]uint32, count)
-
-	iter, err := packIdx.Entries()
-	if err != nil {
-		return nil, fmt.Errorf("reading pack index entries: %w", err)
-	}
-	defer iter.Close()
-
-	for pos := uint32(0); ; pos++ {
-		entry, err := iter.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("reading pack index entry %d: %w", pos, err)
-		}
-		idxHashes = append(idxHashes, entry.Hash)
-		hashToIdxPos[entry.Hash] = pos
-	}
-
-	packOrderHashes := make([]plumbing.Hash, len(packOrder))
-	for packPos, idxPos := range packOrder {
-		packOrderHashes[packPos] = idxHashes[idxPos]
-	}
-
+// NewSearcher builds a Searcher from a bitmap Index and a PackIndex.
+func NewSearcher(bitmapIdx Index, hashSize int, pack PackIndex) *Searcher {
 	entryCount := int(bitmapIdx.EntryCount())
 	entryIndex := make(map[uint32]int, entryCount)
 	off := bitmapIdx.entriesOffset(hashSize)
@@ -75,25 +48,25 @@ func NewSearcher(bitmapIdx Index, hashSize int, packIdx idxfile.Index, packOrder
 	}
 
 	return &Searcher{
-		idx:             bitmapIdx,
-		hashSize:        hashSize,
-		packOrderHashes: packOrderHashes,
-		hashToIdxPos:    hashToIdxPos,
-		entryIndex:      entryIndex,
-		cache:           make([]Bitmap, entryCount),
-	}, nil
+		idx:        bitmapIdx,
+		hashSize:   hashSize,
+		pack:       pack,
+		entryIndex: entryIndex,
+		cache:      make([]Bitmap, entryCount),
+	}
 }
 
 // Reachable returns the hashes of all objects reachable from the given
 // commit. Returns plumbing.ErrObjectNotFound if the commit has no
 // bitmap entry.
 func (s *Searcher) Reachable(commit plumbing.Hash) ([]plumbing.Hash, error) {
-	idxPos, ok := s.hashToIdxPos[commit]
+	// Find the commit's idx position by scanning the entry index.
+	idxPos, ok := s.findIdxPos(commit)
 	if !ok {
 		return nil, plumbing.ErrObjectNotFound
 	}
 
-	ei, ok := s.entryIndex[idxPos]
+	ei, ok := s.entryIndex[uint32(idxPos)]
 	if !ok {
 		return nil, plumbing.ErrObjectNotFound
 	}
@@ -103,13 +76,27 @@ func (s *Searcher) Reachable(commit plumbing.Hash) ([]plumbing.Hash, error) {
 		return nil, err
 	}
 
+	count := s.pack.ObjectCount()
 	var result []plumbing.Hash
-	for i := uint32(0); i < uint32(len(s.packOrderHashes)); i++ {
-		if bm.Get(i) {
-			result = append(result, s.packOrderHashes[i])
+	for packPos := 0; packPos < count; packPos++ {
+		if bm.Get(uint32(packPos)) {
+			idxP := s.pack.IdxPositionAtOffset(packPos)
+			result = append(result, s.pack.ObjectID(idxP))
 		}
 	}
 	return result, nil
+}
+
+// findIdxPos finds the idx position for the given hash by checking
+// which entry has a matching ObjectPosition.
+func (s *Searcher) findIdxPos(h plumbing.Hash) (int, bool) {
+	count := s.pack.ObjectCount()
+	for i := range count {
+		if s.pack.ObjectID(i).Equal(h) {
+			return i, true
+		}
+	}
+	return 0, false
 }
 
 // resolve returns the decompressed, XOR-resolved bitmap for the entry

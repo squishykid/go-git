@@ -137,19 +137,21 @@ func BenchmarkDecodeEWAH(b *testing.B) {
 	}
 }
 
-func loadSearcherFixture(t *testing.T) (Index, *Searcher, []plumbing.Hash) {
+// testPackIndex implements PackIndex for tests using idxfile + revfile data.
+type testPackIndex struct {
+	hashes    []plumbing.Hash
+	packOrder []uint32
+}
+
+func (p *testPackIndex) ObjectCount() int                  { return len(p.hashes) }
+func (p *testPackIndex) ObjectID(idxPos int) plumbing.Hash { return p.hashes[idxPos] }
+func (p *testPackIndex) IdxPositionAtOffset(packPos int) int {
+	return int(p.packOrder[packPos])
+}
+
+func loadTestPackIndex(t *testing.T) *testPackIndex {
 	t.Helper()
 	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
-
-	bf, err := q.Bitmap()
-	require.NoError(t, err)
-	defer bf.Close()
-
-	data, err := io.ReadAll(bf)
-	require.NoError(t, err)
-
-	idx, err := Open(data, hash.New(crypto.SHA1))
-	require.NoError(t, err)
 
 	idxf, err := q.Idx()
 	require.NoError(t, err)
@@ -157,6 +159,20 @@ func loadSearcherFixture(t *testing.T) (Index, *Searcher, []plumbing.Hash) {
 
 	packIdx := idxfile.NewMemoryIndex(crypto.SHA1.Size())
 	require.NoError(t, idxfile.NewDecoder(idxf, hash.New(crypto.SHA1)).Decode(packIdx))
+
+	iter, err := packIdx.Entries()
+	require.NoError(t, err)
+	defer iter.Close()
+
+	var hashes []plumbing.Hash
+	for {
+		e, err := iter.Next()
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+		hashes = append(hashes, e.Hash)
+	}
 
 	revf, err := q.Rev()
 	require.NoError(t, err)
@@ -175,34 +191,17 @@ func loadSearcherFixture(t *testing.T) (Index, *Searcher, []plumbing.Hash) {
 		packOrder = append(packOrder, pos)
 	}
 
-	s, err := NewSearcher(idx, testHashSize, packIdx, packOrder)
-	require.NoError(t, err)
-
-	// Build idx position → hash list for test lookups.
-	iter, err := packIdx.Entries()
-	require.NoError(t, err)
-	defer iter.Close()
-
-	var idxHashes []plumbing.Hash
-	for {
-		e, err := iter.Next()
-		if err == io.EOF {
-			break
-		}
-		require.NoError(t, err)
-		idxHashes = append(idxHashes, e.Hash)
-	}
-
-	return idx, s, idxHashes
+	return &testPackIndex{hashes: hashes, packOrder: packOrder}
 }
 
 func TestSearcherReachable(t *testing.T) {
 	t.Parallel()
 
-	bitmapIdx, s, idxHashes := loadSearcherFixture(t)
+	idx := openFixture(t)
+	pack := loadTestPackIndex(t)
+	s := NewSearcher(idx, testHashSize, pack)
 
-	commitHash := idxHashes[bitmapIdx.Entry(testHashSize, 0).ObjectPosition]
-
+	commitHash := pack.ObjectID(int(idx.Entry(testHashSize, 0).ObjectPosition))
 	reachable, err := s.Reachable(commitHash)
 	require.NoError(t, err)
 	assert.Greater(t, len(reachable), 10)
@@ -211,13 +210,14 @@ func TestSearcherReachable(t *testing.T) {
 func TestSearcherXORResolution(t *testing.T) {
 	t.Parallel()
 
-	bitmapIdx, s, idxHashes := loadSearcherFixture(t)
+	idx := openFixture(t)
+	pack := loadTestPackIndex(t)
+	s := NewSearcher(idx, testHashSize, pack)
 
-	e := bitmapIdx.Entry(testHashSize, 1)
+	e := idx.Entry(testHashSize, 1)
 	require.Equal(t, uint8(1), e.XOROffset)
 
-	commitHash := idxHashes[e.ObjectPosition]
-
+	commitHash := pack.ObjectID(int(e.ObjectPosition))
 	reachable, err := s.Reachable(commitHash)
 	require.NoError(t, err)
 	assert.Greater(t, len(reachable), 10)
@@ -226,7 +226,9 @@ func TestSearcherXORResolution(t *testing.T) {
 func TestSearcherNotFound(t *testing.T) {
 	t.Parallel()
 
-	_, s, _ := loadSearcherFixture(t)
+	idx := openFixture(t)
+	pack := loadTestPackIndex(t)
+	s := NewSearcher(idx, testHashSize, pack)
 
 	_, err := s.Reachable(plumbing.NewHash("0000000000000000000000000000000000000000"))
 	assert.ErrorIs(t, err, plumbing.ErrObjectNotFound)

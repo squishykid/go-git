@@ -248,6 +248,27 @@ func compareObjectID(names []byte, idx int, want []byte) int {
 	return bytes.Compare(names[base:end], want)
 }
 
+// ObjectCount returns the total number of objects in the pack.
+func (s *PackScanner) ObjectCount() int {
+	return s.count
+}
+
+// ObjectID returns the object hash at the given idx position (sorted
+// hash order, 0-indexed).
+func (s *PackScanner) ObjectID(idxPos int) plumbing.Hash {
+	start := s.namesStart + (idxPos * s.hashSize)
+	end := start + s.hashSize
+	h, _ := plumbing.FromBytes(s.idxMmap[start:end])
+	return h
+}
+
+// IdxPositionAtOffset returns the idx position of the object at the
+// given pack-offset position (reverse index order, 0-indexed).
+func (s *PackScanner) IdxPositionAtOffset(packPos int) int {
+	start := revHeader + packPos*4
+	return int(binary.BigEndian.Uint32(s.revMmap[start : start+4]))
+}
+
 // Close releases all memory-mapped resources and closes the underlying files.
 func (s *PackScanner) Close() error {
 	return errors.Join(
