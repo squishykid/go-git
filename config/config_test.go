@@ -277,7 +277,7 @@ func TestMarshalExtensions(t *testing.T) {
 	}{
 		{
 			name:        "no extensions set omits section",
-			setup:       func(c *Config) {},
+			setup:       func(_ *Config) {},
 			wantSection: false,
 		},
 		{
@@ -429,7 +429,9 @@ func (s *ConfigSuite) TestValidateInvalidBranchKey() {
 	s.ErrorIs(config.Validate(), ErrInvalid)
 }
 
-func (s *ConfigSuite) TestValidateInvalidBranch() {
+func (s *ConfigSuite) TestValidateBranchNonRefsPrefix() {
+	// Real git allows any value for branch.*.merge, including values
+	// without a refs/ prefix. Validate should accept them.
 	config := &Config{
 		Branches: map[string]*Branch{
 			"bar": {
@@ -445,7 +447,7 @@ func (s *ConfigSuite) TestValidateInvalidBranch() {
 		},
 	}
 
-	s.ErrorIs(config.Validate(), errBranchInvalidMerge)
+	s.NoError(config.Validate())
 }
 
 func (s *ConfigSuite) TestRemoteConfigDefaultValues() {
@@ -731,6 +733,61 @@ func TestUnmarshalMarshalPackReverseIndex(t *testing.T) {
 			assert.Equal(t, tc.input, string(output))
 		})
 	}
+}
+
+func TestUnmarshalIndexSkipHash(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  OptBool
+	}{
+		{
+			name:  "true",
+			input: "[index]\n\tskipHash = true\n",
+			want:  OptBoolTrue,
+		},
+		{
+			name:  "false",
+			input: "[index]\n\tskipHash = false\n",
+			want:  OptBoolFalse,
+		},
+		{
+			name:  "absent defaults to unset",
+			input: "[core]\n\tbare = false\n",
+			want:  OptBoolUnset,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := NewConfig()
+			err := cfg.Unmarshal([]byte(tc.input))
+			require.NoError(t, err)
+
+			assert.Equal(t, tc.want, cfg.Index.SkipHash)
+		})
+	}
+}
+
+func TestMarshalIndexSkipHash(t *testing.T) {
+	t.Parallel()
+
+	cfg := NewConfig()
+	cfg.Index.SkipHash = OptBoolTrue
+
+	b, err := cfg.Marshal()
+	require.NoError(t, err)
+	assert.Contains(t, string(b), "skipHash = true")
+
+	// Round-trip: unmarshal the marshaled output and verify.
+	cfg2 := NewConfig()
+	err = cfg2.Unmarshal(b)
+	require.NoError(t, err)
+	assert.Equal(t, OptBoolTrue, cfg2.Index.SkipHash)
 }
 
 func TestMerge(t *testing.T) {

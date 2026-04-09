@@ -19,7 +19,7 @@ import (
 	"github.com/go-git/go-billy/v6/memfs"
 	"github.com/go-git/go-billy/v6/osfs"
 	"github.com/go-git/go-billy/v6/util"
-	fixtures "github.com/go-git/go-git-fixtures/v5"
+	fixtures "github.com/go-git/go-git-fixtures/v6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -735,6 +735,7 @@ func (s *WorktreeSuite) TestCheckoutRelativePathSubmoduleInitialized() {
 	s.NoError(err)
 	basicRepo, err := basicSubmodule.Repository()
 	s.NoError(err)
+	defer basicRepo.Close()
 	basicRemotes, err := basicRepo.Remotes()
 	s.NoError(err)
 	s.Equal("https://github.com/git-fixtures/basic.git", basicRemotes[0].Config().URLs[0])
@@ -743,6 +744,7 @@ func (s *WorktreeSuite) TestCheckoutRelativePathSubmoduleInitialized() {
 	s.NoError(err)
 	itselfRepo, err := itselfSubmodule.Repository()
 	s.NoError(err)
+	defer itselfRepo.Close()
 	itselfRemotes, err := itselfRepo.Remotes()
 	s.NoError(err)
 	s.Equal("https://github.com/git-fixtures/submodule.git", itselfRemotes[0].Config().URLs[0])
@@ -2036,7 +2038,8 @@ func (s *WorktreeSuite) TestStatusFileMode() {
 }
 
 func (s *WorktreeSuite) TestSubmodule() {
-	fs := fixtures.ByTag("submodule").One().Worktree()
+	fs, err := fixtures.ByTag("submodule").One().Worktree()
+	s.Require().NoError(err)
 	gitdir, err := fs.Chroot(GitDirName)
 	s.Require().NoError(err)
 
@@ -2279,6 +2282,39 @@ func (s *WorktreeSuite) TestAddUntracked() {
 	s.NoError(err)
 	s.NotNil(obj)
 	s.Equal(int64(3), obj.Size())
+}
+
+func (s *WorktreeSuite) TestAddAbsolutePath() {
+	dir := s.T().TempDir()
+
+	r, err := PlainInit(dir, false)
+	s.NoError(err)
+
+	w, err := r.Worktree()
+	s.NoError(err)
+
+	err = util.WriteFile(w.Filesystem, "foo.txt", []byte("FOO"), 0o644)
+	s.NoError(err)
+
+	absPath := filepath.Join(dir, "foo.txt")
+	_, err = w.Add(absPath)
+	s.NoError(err)
+
+	idx, err := w.r.Storer.Index()
+	s.NoError(err)
+
+	_, err = idx.Entry("foo.txt")
+	s.NoError(err)
+
+	_, err = idx.Entry(absPath)
+	s.Error(err)
+
+	status, err := w.Status()
+	s.NoError(err)
+
+	file := status.File("foo.txt")
+	s.Equal(Added, file.Staging)
+	s.Equal(Unmodified, file.Worktree)
 }
 
 func (s *WorktreeSuite) TestAddCRLF() {
@@ -3136,10 +3172,11 @@ func (s *WorktreeSuite) TestMoveToExistent() {
 }
 
 func (s *WorktreeSuite) TestClean() {
-	fs := fixtures.ByTag("dirty").One().Worktree(fixtures.WithTargetDir(s.T().TempDir))
+	fs, err := fixtures.ByTag("dirty").One().Worktree(fixtures.WithTargetDir(s.T().TempDir))
+	s.Require().NoError(err)
 
 	// Open the repo.
-	fs, err := fs.Chroot("repo")
+	fs, err = fs.Chroot("repo")
 	s.NoError(err)
 	r, err := PlainOpen(fs.Root())
 	s.Require().NoError(err)
@@ -3214,7 +3251,8 @@ func (s *WorktreeSuite) TestCleanBare() {
 
 func TestAlternatesRepo(t *testing.T) {
 	t.Parallel()
-	fs := fixtures.ByTag("alternates").One().Worktree()
+	fs, err := fixtures.ByTag("alternates").One().Worktree()
+	require.NoError(t, err)
 
 	// Open 1st repo.
 	rep1fs, err := fs.Chroot("rep1")
@@ -3645,7 +3683,8 @@ func (s *WorktreeSuite) TestAddAndCommitEmpty() {
 }
 
 func (s *WorktreeSuite) TestLinkedWorktree() {
-	fs := fixtures.ByTag("linked-worktree").One().Worktree(fixtures.WithTargetDir(s.T().TempDir))
+	fs, err := fixtures.ByTag("linked-worktree").One().Worktree(fixtures.WithTargetDir(s.T().TempDir))
+	s.Require().NoError(err)
 
 	// Open main repo.
 	{

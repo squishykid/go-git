@@ -1,3 +1,4 @@
+// Package server provides test helpers for running in-process git servers.
 package server
 
 import (
@@ -5,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/go-git/go-billy/v6"
-	fixtures "github.com/go-git/go-git-fixtures/v5"
+	fixtures "github.com/go-git/go-git-fixtures/v6"
 
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/storage"
@@ -18,7 +19,7 @@ type fixturesLoader struct {
 
 var _ transport.Loader = &fixturesLoader{}
 
-func (f *fixturesLoader) Load(ep *transport.Endpoint) (storage.Storer, error) {
+func (f *fixturesLoader) Load(_ *transport.Endpoint) (storage.Storer, error) {
 	if f.dot == nil {
 		return nil, fmt.Errorf("cannot load endpoint: fixture not set")
 	}
@@ -38,6 +39,9 @@ func Loader(t testing.TB, fix *fixtures.Fixture) transport.Loader {
 	if fix == nil {
 		t.Fatal("Loader: fixture must not be nil")
 	}
-	dot := fix.DotGit(fixtures.WithMemFS())
+	dot, err := fix.DotGit(fixtures.WithMemFS())
+	if err != nil {
+		t.Fatal("Loader: DotGit failed:", err)
+	}
 	return &fixturesLoader{dot: dot}
 }

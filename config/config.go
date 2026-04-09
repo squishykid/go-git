@@ -35,7 +35,7 @@ const (
 )
 
 // ConfigStorer is a generic storage of Config object.
-type ConfigStorer interface {
+type ConfigStorer interface { //nolint:revive // stutters but is a well-established name
 	Config() (*Config, error)
 	SetConfig(*Config) error
 }
@@ -137,6 +137,14 @@ type Config struct {
 		// WriteReverseIndex controls whether Git writes .rev files
 		// when creating new packfiles. Defaults to true.
 		WriteReverseIndex bool
+	}
+
+	Index struct {
+		// SkipHash if true, the index checksum is not written or verified.
+		// This corresponds to git's index.skipHash configuration (git 2.40+),
+		// which skips the trailing SHA-1/SHA-256 computation for performance
+		// on large repositories.
+		SkipHash OptBool
 	}
 
 	Init struct {
@@ -450,6 +458,8 @@ const (
 	autoCRLFKey                = "autocrlf"
 	fileModeKey                = "filemode"
 	hooksPathKey               = "hooksPath"
+	indexSection               = "index"
+	skipHashKey                = "skipHash"
 	formatKey                  = "format"
 	allowedSignersFileKey      = "allowedSignersFile"
 	gpgSignKey                 = "gpgSign"
@@ -473,6 +483,7 @@ func (c *Config) Unmarshal(b []byte) error {
 
 	c.unmarshalCore()
 	c.unmarshalExtensions()
+	c.unmarshalIndex()
 	c.unmarshalTag()
 	c.unmarshalCommit()
 	c.unmarshalUser()
@@ -680,6 +691,14 @@ func (c *Config) unmarshalProtocol() error {
 	return nil
 }
 
+func (c *Config) unmarshalIndex() {
+	s := c.Raw.Section(indexSection)
+	v, err := strconv.ParseBool(s.Options.Get(skipHashKey))
+	if err == nil {
+		c.Index.SkipHash = NewOptBool(v)
+	}
+}
+
 func (c *Config) unmarshalInit() {
 	s := c.Raw.Section(initSection)
 	c.Init.DefaultBranch = s.Options.Get(defaultBranchKey)
@@ -696,6 +715,7 @@ func (c *Config) Marshal() ([]byte, error) {
 
 	c.marshalCore()
 	c.marshalExtensions()
+	c.marshalIndex()
 	c.marshalTag()
 	c.marshalCommit()
 	c.marshalUser()
@@ -926,6 +946,13 @@ func (c *Config) marshalProtocol() {
 	}
 }
 
+func (c *Config) marshalIndex() {
+	if c.Index.SkipHash.IsSet() {
+		s := c.Raw.Section(indexSection)
+		s.SetOption(skipHashKey, c.Index.SkipHash.FormatBool())
+	}
+}
+
 func (c *Config) marshalInit() {
 	s := c.Raw.Section(initSection)
 	if c.Init.DefaultBranch != "" {
@@ -1021,7 +1048,7 @@ func (c *RemoteConfig) marshal() *format.Subsection {
 	if len(c.Fetch) == 0 {
 		c.raw.RemoveOption(fetchKey)
 	} else {
-		var values []string
+		values := make([]string, 0, len(c.Fetch))
 		for _, rs := range c.Fetch {
 			values = append(values, rs.String())
 		}

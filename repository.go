@@ -353,7 +353,8 @@ func PlainInit(path string, isBare bool, options ...InitOption) (*Repository, er
 		wt = osfs.New(path, osfs.WithBoundOS())
 		dot, _ = wt.Chroot(GitDirName)
 		initFn = func(s *filesystem.Storage) (*Repository, error) {
-			oo := []InitOption{WithWorkTree(wt)}
+			oo := make([]InitOption, 0, 1+len(options))
+			oo = append(oo, WithWorkTree(wt))
 			oo = append(oo, options...)
 			return Init(s, oo...)
 		}
@@ -658,6 +659,16 @@ func checkTargetDirIsEmpty(path string) (empty bool, err error) {
 	return false, nil
 }
 
+// Close releases any open resources held by the repository. It must be called
+// when the repository is no longer needed. It is safe to call Close on a
+// repository backed by memory storage, where it is a no-op.
+func (r *Repository) Close() error {
+	if c, ok := r.Storer.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
+}
+
 // Config return the repository config. In a filesystem backed repository this
 // means read the `.git/config`.
 func (r *Repository) Config() (*config.Config, error) {
@@ -849,6 +860,8 @@ func (r *Repository) CreateBranch(c *config.Branch) error {
 
 // DeleteBranch delete a Branch from the repository and delete the config
 func (r *Repository) DeleteBranch(name string) error {
+	name = strings.TrimPrefix(name, "refs/heads/")
+
 	cfg, err := r.Config()
 	if err != nil {
 		return err
@@ -1290,14 +1303,15 @@ func (r *Repository) updateReferences(spec []config.RefSpec,
 		return updateReferenceStorerIfNeeded(r.Storer, head)
 	}
 
-	refs := []*plumbing.Reference{
+	remoteHeadRefs := r.calculateRemoteHeadReference(spec, resolvedRef)
+	refs := make([]*plumbing.Reference, 0, 2+len(remoteHeadRefs))
+	refs = append(refs,
 		// Create local reference for the resolved ref
 		resolvedRef,
 		// Create local symbolic HEAD
 		plumbing.NewSymbolicReference(plumbing.HEAD, resolvedRef.Name()),
-	}
-
-	refs = append(refs, r.calculateRemoteHeadReference(spec, resolvedRef)...)
+	)
+	refs = append(refs, remoteHeadRefs...)
 
 	for _, ref := range refs {
 		u, err := updateReferenceStorerIfNeeded(r.Storer, ref)
