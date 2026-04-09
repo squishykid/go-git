@@ -25,24 +25,24 @@ var (
 
 // Open validates the raw bytes of a bitmap index file and returns an
 // Index for on-demand field access. h is used for checksum verification.
-func Open(data []byte, h hash.Hash) (Index, error) {
+func Open(data []byte, h hash.Hash) (*Index, error) {
 	hashSize := h.Size()
 	minSize := headerFixedSize + hashSize + hashSize // header + at least trailing checksum
 	if len(data) < minSize {
-		return Index{}, fmt.Errorf("bitmap file too short (%d bytes)", len(data))
+		return nil, fmt.Errorf("bitmap file too short (%d bytes)", len(data))
 	}
 
 	if !bytes.Equal(data[:4], bitmapHeader) {
-		return Index{}, ErrInvalidSignature
+		return nil, ErrInvalidSignature
 	}
 
-	idx := Index{b: data, hashSize: hashSize}
+	idx := &Index{b: data, hashSize: hashSize}
 
 	if idx.Version() != VersionSupported {
-		return Index{}, fmt.Errorf("%w: %d", ErrUnsupportedVersion, idx.Version())
+		return nil, fmt.Errorf("%w: %d", ErrUnsupportedVersion, idx.Version())
 	}
 	if idx.Flags()&OptFullDAG == 0 {
-		return Index{}, ErrMissingFullDAG
+		return nil, ErrMissingFullDAG
 	}
 
 	// Verify file checksum: hash everything except the trailing checksum.
@@ -51,7 +51,7 @@ func Open(data []byte, h hash.Hash) (Index, error) {
 	computed := h.Sum(nil)
 	trailing := data[len(data)-hashSize:]
 	if !bytes.Equal(computed, trailing) {
-		return Index{}, fmt.Errorf("%w: got %x, want %x", ErrInvalidChecksum, trailing, computed)
+		return nil, fmt.Errorf("%w: got %x, want %x", ErrInvalidChecksum, trailing, computed)
 	}
 
 	idx.buildEntryOffsets()

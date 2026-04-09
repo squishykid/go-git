@@ -24,7 +24,7 @@ type PackIndex interface {
 // Searcher provides object reachability lookups using a bitmap index
 // combined with a pack index.
 type Searcher struct {
-	idx  Index
+	idx  *Index
 	pack PackIndex
 
 	// entryIndex maps ObjectPosition (idx position) to the entry
@@ -36,7 +36,7 @@ type Searcher struct {
 }
 
 // NewSearcher builds a Searcher from a bitmap Index and a PackIndex.
-func NewSearcher(bitmapIdx Index, pack PackIndex) *Searcher {
+func NewSearcher(bitmapIdx *Index, pack PackIndex) *Searcher {
 	entryCount := int(bitmapIdx.EntryCount())
 	entryIndex := make(map[uint32]int, entryCount)
 	for i := range entryCount {

@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func openFixture(t testing.TB) Index {
+func openFixture(t testing.TB) *Index {
 	t.Helper()
 	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
 
