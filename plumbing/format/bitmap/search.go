@@ -1,44 +1,12 @@
 package bitmap
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io"
 
-	"github.com/erizocosmico/go-ewah"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/idxfile"
 )
-
-// bitset is a flat uncompressed bitmap stored as a slice of uint64 words.
-// Bit i is stored in words[i/64] at position (i%64), using LSB-first
-// ordering to match git's bitmap convention.
-type bitset struct {
-	bits  uint32
-	words []uint64
-}
-
-// get returns the value of bit at position pos.
-func (b *bitset) get(pos uint32) bool {
-	if pos >= b.bits {
-		return false
-	}
-	w := pos / 64
-	bit := pos % 64
-	return b.words[w]&(1<<bit) != 0
-}
-
-// xor modifies b in place: b = b XOR other.
-func (b *bitset) xor(other *bitset) {
-	for i := range min(len(b.words), len(other.words)) {
-		b.words[i] ^= other.words[i]
-	}
-	if len(other.words) > len(b.words) {
-		b.words = append(b.words, other.words[len(b.words):]...)
-	}
-	b.bits = max(b.bits, other.bits)
-}
 
 // Searcher provides object reachability lookups using a bitmap index
 // combined with a pack index and reverse index.
@@ -46,11 +14,17 @@ type Searcher struct {
 	// packOrderHashes maps pack-offset position to object hash.
 	// Bitmap bits are indexed by pack-offset position.
 	packOrderHashes []plumbing.Hash
-	// entryBitmaps maps entry ObjectPosition (idx position) to the
-	// resolved reachability bitset.
-	entryBitmaps map[uint32]*bitset
 	// hashToIdxPos maps object hash to its pack index position.
 	hashToIdxPos map[plumbing.Hash]uint32
+
+	// entries is the raw entry list from the decoded Index.
+	entries []Entry
+	// entryIndex maps ObjectPosition (idx position) to the index
+	// into entries.
+	entryIndex map[uint32]int
+	// cache holds decompressed and XOR-resolved bitmaps, keyed by
+	// entry index. Populated lazily on first access.
+	cache []Bitmap
 }
 
 // NewSearcher builds a Searcher by combining a decoded bitmap Index with
@@ -65,7 +39,6 @@ func NewSearcher(bitmapIdx *Index, packIdx idxfile.Index, packOrder []uint32) (*
 		return nil, fmt.Errorf("reading pack index count: %w", err)
 	}
 
-	// Build idx position → hash mapping.
 	idxHashes := make([]plumbing.Hash, 0, count)
 	hashToIdxPos := make(map[plumbing.Hash]uint32, count)
 
@@ -87,21 +60,22 @@ func NewSearcher(bitmapIdx *Index, packIdx idxfile.Index, packOrder []uint32) (*
 		hashToIdxPos[entry.Hash] = pos
 	}
 
-	// Build pack-offset-order hash list using the reverse index.
 	packOrderHashes := make([]plumbing.Hash, len(packOrder))
 	for packPos, idxPos := range packOrder {
 		packOrderHashes[packPos] = idxHashes[idxPos]
 	}
 
-	bitmaps, err := resolveEntries(bitmapIdx.Entries)
-	if err != nil {
-		return nil, err
+	entryIndex := make(map[uint32]int, len(bitmapIdx.Entries))
+	for i, e := range bitmapIdx.Entries {
+		entryIndex[e.ObjectPosition] = i
 	}
 
 	return &Searcher{
 		packOrderHashes: packOrderHashes,
-		entryBitmaps:    bitmaps,
 		hashToIdxPos:    hashToIdxPos,
+		entries:         bitmapIdx.Entries,
+		entryIndex:      entryIndex,
+		cache:           make([]Bitmap, len(bitmapIdx.Entries)),
 	}, nil
 }
 
@@ -114,95 +88,65 @@ func (s *Searcher) Reachable(commit plumbing.Hash) ([]plumbing.Hash, error) {
 		return nil, plumbing.ErrObjectNotFound
 	}
 
-	bs, ok := s.entryBitmaps[idxPos]
+	ei, ok := s.entryIndex[idxPos]
 	if !ok {
 		return nil, plumbing.ErrObjectNotFound
 	}
 
+	bm, err := s.resolve(ei)
+	if err != nil {
+		return nil, err
+	}
+
 	var result []plumbing.Hash
 	for i := uint32(0); i < uint32(len(s.packOrderHashes)); i++ {
-		if bs.get(i) {
+		if bm.Get(i) {
 			result = append(result, s.packOrderHashes[i])
 		}
 	}
 	return result, nil
 }
 
-// resolveEntries resolves XOR compression across all entries and returns
-// a map from ObjectPosition (idx position) to the fully resolved bitset.
-func resolveEntries(entries []Entry) (map[uint32]*bitset, error) {
-	resolved := make([]*bitset, len(entries))
-	out := make(map[uint32]*bitset, len(entries))
-
-	for i, e := range entries {
-		bs, err := decompress(e.Bitmap)
-		if err != nil {
-			return nil, fmt.Errorf("decompressing entry %d: %w", i, err)
-		}
-		if e.XOROffset > 0 {
-			base := i - int(e.XOROffset)
-			if base < 0 || base >= len(resolved) || resolved[base] == nil {
-				return nil, fmt.Errorf("%w: entry %d references offset %d",
-					ErrInvalidXOROffset, i, e.XOROffset)
-			}
-			bs.xor(resolved[base])
-		}
-		resolved[i] = bs
-		out[e.ObjectPosition] = bs
+// resolve returns the decompressed, XOR-resolved bitmap for the entry
+// at the given index, populating the cache on first access.
+func (s *Searcher) resolve(idx int) (Bitmap, error) {
+	if bm := s.cache[idx]; bm != nil {
+		return bm, nil
 	}
-	return out, nil
+
+	e := s.entries[idx]
+	bm, err := DecodeEWAH(e.Bitmap)
+	if err != nil {
+		return nil, fmt.Errorf("decompressing entry %d: %w", idx, err)
+	}
+
+	if e.XOROffset > 0 {
+		base := idx - int(e.XOROffset)
+		if base < 0 {
+			return nil, fmt.Errorf("%w: entry %d references offset %d",
+				ErrInvalidXOROffset, idx, e.XOROffset)
+		}
+		baseBm, err := s.resolve(base)
+		if err != nil {
+			return nil, err
+		}
+		bm = xorBitmaps(bm, baseBm)
+	}
+
+	s.cache[idx] = bm
+	return bm, nil
 }
 
-// decompress converts an EWAH compressed bitmap into a flat bitset by
-// walking the serialized RLW/literal structure.
-func decompress(bm *ewah.Bitmap) (*bitset, error) {
-	var buf bytes.Buffer
-	if _, err := bm.Write(&buf, binary.BigEndian); err != nil {
-		return nil, err
+// xorBitmaps returns a new Bitmap where each byte is a XOR b.
+func xorBitmaps(a, b Bitmap) Bitmap {
+	n := max(len(a), len(b))
+	out := make(Bitmap, n)
+	copy(out, a)
+	for i := range min(len(out), len(b)) {
+		out[i] ^= b[i]
 	}
-	data := buf.Bytes()
-	if len(data) < 12 {
-		return nil, fmt.Errorf("ewah data too short: %d bytes", len(data))
+	if len(b) > len(a) {
+		copy(out[len(a):], b[len(a):])
 	}
-
-	bits := binary.BigEndian.Uint32(data[0:4])
-	wordCount := binary.BigEndian.Uint32(data[4:8])
-
-	nWords := (bits + 63) / 64
-	words := make([]uint64, nWords)
-
-	pos := uint32(0) // position in uncompressed output (in words)
-	i := uint32(0)   // position in compressed word array
-
-	for i < wordCount {
-		if 8+int(i)*8+8 > len(data) {
-			break
-		}
-		rlw := binary.BigEndian.Uint64(data[8+i*8 : 8+i*8+8])
-		i++
-
-		fillBit := rlw >> 63
-		k := uint32((rlw >> 31) & 0xFFFFFFFF)
-		l := uint32(rlw & 0x7FFFFFFF)
-
-		var fillWord uint64
-		if fillBit != 0 {
-			fillWord = ^uint64(0)
-		}
-		for j := uint32(0); j < k && pos < nWords; j++ {
-			words[pos] = fillWord
-			pos++
-		}
-
-		for j := uint32(0); j < l && pos < nWords; j++ {
-			if 8+int(i)*8+8 > len(data) {
-				break
-			}
-			words[pos] = binary.BigEndian.Uint64(data[8+i*8 : 8+i*8+8])
-			pos++
-			i++
-		}
-	}
-
-	return &bitset{bits: bits, words: words}, nil
+	return out
 }

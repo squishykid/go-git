@@ -3,7 +3,6 @@ package bitmap
 import (
 	"errors"
 
-	"github.com/erizocosmico/go-ewah"
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
@@ -39,18 +38,15 @@ type Index struct {
 	// Checksum is the checksum of the bitmap index file itself.
 	Checksum plumbing.Hash
 
-	// Commits is an EWAH bitmap indicating which pack index positions
-	// correspond to commit objects.
-	Commits *ewah.Bitmap
-	// Trees is an EWAH bitmap indicating which pack index positions
-	// correspond to tree objects.
-	Trees *ewah.Bitmap
-	// Blobs is an EWAH bitmap indicating which pack index positions
-	// correspond to blob objects.
-	Blobs *ewah.Bitmap
-	// Tags is an EWAH bitmap indicating which pack index positions
-	// correspond to tag objects.
-	Tags *ewah.Bitmap
+	// Commits is the EWAH-compressed bitmap indicating which pack index
+	// positions correspond to commit objects.
+	Commits BitmapEWAH
+	// Trees is the EWAH-compressed bitmap for tree objects.
+	Trees BitmapEWAH
+	// Blobs is the EWAH-compressed bitmap for blob objects.
+	Blobs BitmapEWAH
+	// Tags is the EWAH-compressed bitmap for tag objects.
+	Tags BitmapEWAH
 
 	// Entries holds the per-commit reachability bitmaps.
 	Entries []Entry
@@ -69,6 +65,6 @@ type Entry struct {
 	XOROffset uint8
 	// Flags holds per-entry flags.
 	Flags uint8
-	// Bitmap is the EWAH compressed reachability bitmap for this commit.
-	Bitmap *ewah.Bitmap
+	// Bitmap is the EWAH-compressed reachability bitmap for this commit.
+	Bitmap BitmapEWAH
 }

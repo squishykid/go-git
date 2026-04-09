@@ -2,12 +2,10 @@ package bitmap
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 
-	"github.com/erizocosmico/go-ewah"
 	"github.com/go-git/go-git/v6/plumbing/hash"
 	utilbin "github.com/go-git/go-git/v6/utils/binary"
 )
@@ -112,19 +110,19 @@ func (d *Decoder) decodeHeader(idx *Index) error {
 
 func (d *Decoder) decodeTypeBitmaps(idx *Index) error {
 	var err error
-	idx.Commits, err = ewah.FromReader(d, binary.BigEndian)
+	idx.Commits, err = ReadEWAH(d)
 	if err != nil {
 		return fmt.Errorf("reading commits bitmap: %w", err)
 	}
-	idx.Trees, err = ewah.FromReader(d, binary.BigEndian)
+	idx.Trees, err = ReadEWAH(d)
 	if err != nil {
 		return fmt.Errorf("reading trees bitmap: %w", err)
 	}
-	idx.Blobs, err = ewah.FromReader(d, binary.BigEndian)
+	idx.Blobs, err = ReadEWAH(d)
 	if err != nil {
 		return fmt.Errorf("reading blobs bitmap: %w", err)
 	}
-	idx.Tags, err = ewah.FromReader(d, binary.BigEndian)
+	idx.Tags, err = ReadEWAH(d)
 	if err != nil {
 		return fmt.Errorf("reading tags bitmap: %w", err)
 	}
@@ -139,7 +137,7 @@ func (d *Decoder) decodeEntries(idx *Index) error {
 			return fmt.Errorf("reading entry %d header: %w", i, err)
 		}
 
-		bm, err := ewah.FromReader(d, binary.BigEndian)
+		bm, err := ReadEWAH(d)
 		if err != nil {
 			return fmt.Errorf("reading entry %d bitmap: %w", i, err)
 		}
@@ -155,14 +153,7 @@ func (d *Decoder) decodeEntries(idx *Index) error {
 }
 
 func (d *Decoder) decodeNameHashCache(idx *Index) error {
-	// The hash cache contains one uint32 per object in the pack.
-	// We determine the count from the commits type bitmap which
-	// tracks all pack index positions.
-	//
-	// The number of objects equals the highest bit count among
-	// the type bitmaps, since each type bitmap covers the full
-	// pack index range.
-	n := maxBits(idx.Commits, idx.Trees, idx.Blobs, idx.Tags)
+	n := maxBitCount(idx.Commits, idx.Trees, idx.Blobs, idx.Tags)
 	if n == 0 {
 		return nil
 	}
@@ -178,12 +169,12 @@ func (d *Decoder) decodeNameHashCache(idx *Index) error {
 	return nil
 }
 
-func maxBits(bitmaps ...*ewah.Bitmap) uint32 {
-	var max uint32
+func maxBitCount(bitmaps ...BitmapEWAH) uint32 {
+	var m uint32
 	for _, b := range bitmaps {
-		if b != nil && b.Bits() > max {
-			max = b.Bits()
+		if c := b.BitCount(); c > m {
+			m = c
 		}
 	}
-	return max
+	return m
 }

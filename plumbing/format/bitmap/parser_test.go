@@ -46,11 +46,11 @@ func TestDecode(t *testing.T) {
 	assert.NotNil(t, idx.Blobs)
 	assert.NotNil(t, idx.Tags)
 
-	// Type bitmap bit counts.
-	assert.Equal(t, uint32(6731), idx.Commits.Bits())
-	assert.Equal(t, uint32(25072), idx.Trees.Bits())
-	assert.Equal(t, uint32(25061), idx.Blobs.Bits())
-	assert.Equal(t, uint32(0), idx.Tags.Bits())
+	// Type bitmap bit counts (from EWAH headers).
+	assert.Equal(t, uint32(6731), idx.Commits.BitCount())
+	assert.Equal(t, uint32(25072), idx.Trees.BitCount())
+	assert.Equal(t, uint32(25061), idx.Blobs.BitCount())
+	assert.Equal(t, uint32(0), idx.Tags.BitCount())
 
 	// Name-hash cache should have one entry per object in the pack.
 	assert.Len(t, idx.NameHashCache, 25072)
@@ -77,7 +77,7 @@ func TestDecodeEntries(t *testing.T) {
 	assert.Equal(t, uint8(0), e.XOROffset)
 	assert.Equal(t, uint8(0), e.Flags)
 	assert.NotNil(t, e.Bitmap)
-	assert.Equal(t, uint32(25088), e.Bitmap.Bits())
+	assert.Equal(t, uint32(25088), e.Bitmap.BitCount())
 
 	// Second entry has XOR offset 1.
 	e = idx.Entries[1]

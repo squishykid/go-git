@@ -3,7 +3,25 @@ package bitmap
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 )
+
+// BitmapEWAH holds the raw on-disk EWAH-compressed bitmap data:
+//
+//	4-byte bit count (big-endian)
+//	4-byte compressed word count (big-endian)
+//	N × 8-byte compressed words (big-endian)
+//	4-byte RLW position (big-endian)
+type BitmapEWAH []byte
+
+// BitCount returns the number of uncompressed bits described by the
+// compressed bitmap.
+func (b BitmapEWAH) BitCount() uint32 {
+	if len(b) < 4 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(b[0:4])
+}
 
 // Bitmap is a decompressed bitmap stored as a byte slice. Bit i is stored
 // at byte i/8, bit position 7-(i%8) (big-endian / MSB-first within each
@@ -21,14 +39,32 @@ func (b Bitmap) Get(pos uint32) bool {
 	return b[byteIdx]&(1<<bitIdx) != 0
 }
 
-// DecodeEWAH decompresses an EWAH-encoded bitmap from its on-disk
-// representation. data must contain the full EWAH entry:
-//
-//	4-byte bit count (big-endian)
-//	4-byte compressed word count (big-endian)
-//	N × 8-byte compressed words (big-endian)
-//	4-byte RLW position (big-endian, ignored)
-func DecodeEWAH(data []byte) (Bitmap, error) {
+// Bits returns the number of bits in the bitmap (always a multiple of 8).
+func (b Bitmap) Bits() uint32 {
+	return uint32(len(b)) * 8
+}
+
+// ReadEWAH reads a single EWAH-encoded bitmap from r and returns the
+// raw compressed bytes. It reads exactly the number of bytes specified
+// by the on-disk header (8 + wordCount*8 + 4).
+func ReadEWAH(r io.Reader) (BitmapEWAH, error) {
+	var header [8]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		return nil, fmt.Errorf("ewah: reading header: %w", err)
+	}
+	wordCount := binary.BigEndian.Uint32(header[4:8])
+
+	remaining := int(wordCount)*8 + 4
+	data := make(BitmapEWAH, 8+remaining)
+	copy(data, header[:])
+	if _, err := io.ReadFull(r, data[8:]); err != nil {
+		return nil, fmt.Errorf("ewah: reading body: %w", err)
+	}
+	return data, nil
+}
+
+// DecodeEWAH decompresses an EWAH-encoded bitmap into a flat Bitmap.
+func DecodeEWAH(data BitmapEWAH) (Bitmap, error) {
 	if len(data) < 12 {
 		return nil, fmt.Errorf("ewah: data too short (%d bytes, need at least 12)", len(data))
 	}
@@ -48,10 +84,10 @@ func DecodeEWAH(data []byte) (Bitmap, error) {
 	nBytes := (bits + 7) / 8
 	out := make(Bitmap, nBytes)
 
-	outWord := uint32(0)                   // current uncompressed word index
-	nWords := (bits + 63) / 64             // total uncompressed words
-	compIdx := uint32(0)                   // index into compressed word array
-	compBase := 8                          // byte offset where compressed words start
+	outWord := uint32(0)
+	nWords := (bits + 63) / 64
+	compIdx := uint32(0)
+	compBase := 8
 
 	for compIdx < wordCount {
 		rlw := binary.BigEndian.Uint64(data[compBase+int(compIdx)*8:])
@@ -61,7 +97,6 @@ func DecodeEWAH(data []byte) (Bitmap, error) {
 		k := uint32((rlw >> 31) & 0xFFFFFFFF)
 		l := uint32(rlw & 0x7FFFFFFF)
 
-		// Write k fill words.
 		if fillBit != 0 {
 			for j := uint32(0); j < k && outWord < nWords; j++ {
 				writeWord(out, outWord, ^uint64(0))
@@ -71,7 +106,6 @@ func DecodeEWAH(data []byte) (Bitmap, error) {
 			outWord += min(k, nWords-outWord)
 		}
 
-		// Copy l literal words.
 		for j := uint32(0); j < l && outWord < nWords; j++ {
 			w := binary.BigEndian.Uint64(data[compBase+int(compIdx)*8:])
 			compIdx++
