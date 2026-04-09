@@ -53,6 +53,59 @@ func (b Bitmap) Bits() uint32 {
 	return uint32(len(b)) * 8
 }
 
+// SetBitsIterator iterates over the indices of set bits in a Bitmap.
+type SetBitsIterator struct {
+	b   Bitmap
+	pos uint32 // current byte index
+	bit uint8  // next bit to check within current byte (7 = MSB, 0 = LSB)
+	rem byte   // remaining bits in current byte (masked copy)
+}
+
+// SetBits returns an iterator over the indices of all set bits.
+func (b Bitmap) SetBits() *SetBitsIterator {
+	it := &SetBitsIterator{b: b}
+	it.advance()
+	return it
+}
+
+// Next returns the index of the next set bit and true, or (0, false)
+// when there are no more set bits.
+func (it *SetBitsIterator) Next() (uint32, bool) {
+	for it.rem != 0 {
+		bit := it.bit
+		mask := byte(1 << bit)
+		if it.rem&mask != 0 {
+			it.rem &^= mask
+			pos := it.pos*8 + uint32(7-bit)
+			if it.rem == 0 {
+				it.pos++
+				it.advance()
+			}
+			return pos, true
+		}
+		if bit == 0 {
+			it.pos++
+			it.advance()
+		} else {
+			it.bit--
+		}
+	}
+	return 0, false
+}
+
+// advance skips zero bytes to find the next byte with set bits.
+func (it *SetBitsIterator) advance() {
+	for it.pos < uint32(len(it.b)) {
+		if it.b[it.pos] != 0 {
+			it.rem = it.b[it.pos]
+			it.bit = 7
+			return
+		}
+		it.pos++
+	}
+	it.rem = 0
+}
+
 // DecodeEWAH decompresses an EWAH-encoded bitmap into a flat Bitmap.
 func DecodeEWAH(data EWAH) (Bitmap, error) {
 	if len(data) < 12 {

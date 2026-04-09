@@ -162,6 +162,54 @@ func TestBitmapGet(t *testing.T) {
 	assert.False(t, bm.Get(8)) // out of range
 }
 
+func TestSetBitsIterator(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
+		bm := Bitmap([]byte{0x00, 0x00})
+		it := bm.SetBits()
+		_, ok := it.Next()
+		assert.False(t, ok)
+	})
+
+	t.Run("single byte", func(t *testing.T) {
+		t.Parallel()
+		bm := Bitmap([]byte{0xA5}) // 1010 0101 → bits 0,2,5,7
+		it := bm.SetBits()
+
+		var got []uint32
+		for pos, ok := it.Next(); ok; pos, ok = it.Next() {
+			got = append(got, pos)
+		}
+		assert.Equal(t, []uint32{0, 2, 5, 7}, got)
+	})
+
+	t.Run("multi byte with gaps", func(t *testing.T) {
+		t.Parallel()
+		bm := Bitmap([]byte{0x80, 0x00, 0x01}) // bit 0, then zeros, then bit 23
+		it := bm.SetBits()
+
+		var got []uint32
+		for pos, ok := it.Next(); ok; pos, ok = it.Next() {
+			got = append(got, pos)
+		}
+		assert.Equal(t, []uint32{0, 23}, got)
+	})
+
+	t.Run("all ones", func(t *testing.T) {
+		t.Parallel()
+		bm := Bitmap([]byte{0xFF})
+		it := bm.SetBits()
+
+		var got []uint32
+		for pos, ok := it.Next(); ok; pos, ok = it.Next() {
+			got = append(got, pos)
+		}
+		assert.Equal(t, []uint32{0, 1, 2, 3, 4, 5, 6, 7}, got)
+	})
+}
+
 // rlw builds a Running Length Word.
 func rlw(fill bool, k uint32, l uint32) uint64 {
 	var b uint64

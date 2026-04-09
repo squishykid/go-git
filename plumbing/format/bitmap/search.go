@@ -1,31 +1,16 @@
 package bitmap
 
 import (
+	"errors"
 	"fmt"
-
-	"github.com/go-git/go-git/v6/plumbing"
 )
 
-// PackIndex provides the pack metadata needed by the Searcher to map
-// bitmap bit positions to object hashes. Implementations must support
-// lookup by both idx position (sorted hash order) and pack-offset
-// position (reverse index order).
-type PackIndex interface {
-	// ObjectCount returns the total number of objects in the pack.
-	ObjectCount() int
-	// ObjectID returns the object hash at the given idx position
-	// (sorted hash order, 0-indexed).
-	ObjectID(idxPos int) plumbing.Hash
-	// IdxPositionAtOffset returns the idx position of the object at
-	// the given pack-offset position (reverse index order, 0-indexed).
-	IdxPositionAtOffset(packPos int) int
-}
+// ErrNoEntry is returned when the given index position has no bitmap entry.
+var ErrNoEntry = errors.New("no bitmap entry for index position")
 
-// Searcher provides object reachability lookups using a bitmap index
-// combined with a pack index.
+// Searcher provides object reachability lookups using a bitmap index.
 type Searcher struct {
-	idx  *Index
-	pack PackIndex
+	idx *Index
 
 	// entryIndex maps ObjectPosition (idx position) to the entry
 	// ordinal in the bitmap file.
@@ -35,8 +20,8 @@ type Searcher struct {
 	cache []Bitmap
 }
 
-// NewSearcher builds a Searcher from a bitmap Index and a PackIndex.
-func NewSearcher(bitmapIdx *Index, pack PackIndex) *Searcher {
+// NewSearcher builds a Searcher from a bitmap Index.
+func NewSearcher(bitmapIdx *Index) *Searcher {
 	entryCount := int(bitmapIdx.EntryCount())
 	entryIndex := make(map[uint32]int, entryCount)
 	for i := range entryCount {
@@ -45,53 +30,21 @@ func NewSearcher(bitmapIdx *Index, pack PackIndex) *Searcher {
 
 	return &Searcher{
 		idx:        bitmapIdx,
-		pack:       pack,
 		entryIndex: entryIndex,
 		cache:      make([]Bitmap, entryCount),
 	}
 }
 
-// Reachable returns the hashes of all objects reachable from the given
-// commit. Returns plumbing.ErrObjectNotFound if the commit has no
+// Reachable returns the decompressed reachability bitmap for the commit
+// at the given pack index position. The bitmap has one bit per object
+// in pack-offset order. Returns [ErrNoEntry] if the position has no
 // bitmap entry.
-func (s *Searcher) Reachable(commit plumbing.Hash) ([]plumbing.Hash, error) {
-	// Find the commit's idx position by scanning the entry index.
-	idxPos, ok := s.findIdxPos(commit)
+func (s *Searcher) Reachable(idxPos uint32) (Bitmap, error) {
+	ei, ok := s.entryIndex[idxPos]
 	if !ok {
-		return nil, plumbing.ErrObjectNotFound
+		return nil, fmt.Errorf("%w: %d", ErrNoEntry, idxPos)
 	}
-
-	ei, ok := s.entryIndex[uint32(idxPos)]
-	if !ok {
-		return nil, plumbing.ErrObjectNotFound
-	}
-
-	bm, err := s.resolve(ei)
-	if err != nil {
-		return nil, err
-	}
-
-	count := s.pack.ObjectCount()
-	var result []plumbing.Hash
-	for packPos := 0; packPos < count; packPos++ {
-		if bm.Get(uint32(packPos)) {
-			idxP := s.pack.IdxPositionAtOffset(packPos)
-			result = append(result, s.pack.ObjectID(idxP))
-		}
-	}
-	return result, nil
-}
-
-// findIdxPos finds the idx position for the given hash by checking
-// which entry has a matching ObjectPosition.
-func (s *Searcher) findIdxPos(h plumbing.Hash) (int, bool) {
-	count := s.pack.ObjectCount()
-	for i := range count {
-		if s.pack.ObjectID(i).Equal(h) {
-			return i, true
-		}
-	}
-	return 0, false
+	return s.resolve(ei)
 }
 
 // resolve returns the decompressed, XOR-resolved bitmap for the entry
@@ -122,6 +75,27 @@ func (s *Searcher) resolve(ordinal int) (Bitmap, error) {
 
 	s.cache[ordinal] = bm
 	return bm, nil
+}
+
+// ReachableCommits returns an iterator over the pack index positions of
+// all commit objects that are set in bm. It intersects bm with the
+// commits type bitmap from the index.
+func (s *Searcher) ReachableCommits(bm Bitmap) (*SetBitsIterator, error) {
+	commits, err := DecodeEWAH(s.idx.Commits())
+	if err != nil {
+		return nil, fmt.Errorf("decompressing commits bitmap: %w", err)
+	}
+	return andBitmaps(bm, commits).SetBits(), nil
+}
+
+// andBitmaps returns a new Bitmap where each byte is a AND b.
+func andBitmaps(a, b Bitmap) Bitmap {
+	n := min(len(a), len(b))
+	out := make(Bitmap, n)
+	for i := range n {
+		out[i] = a[i] & b[i]
+	}
+	return out
 }
 
 // xorBitmaps returns a new Bitmap where each byte is a XOR b.
