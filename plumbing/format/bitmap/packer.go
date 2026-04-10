@@ -73,11 +73,7 @@ func (p *Packer) Negotiate(wants, haves []plumbing.Hash) (Bitmap, error) {
 	haveBm, _, _ := p.Reachability(haves)
 
 	// AND NOT: clear bits for objects the client already has.
-	for i := range wantBm {
-		if i < len(haveBm) {
-			wantBm[i] &^= haveBm[i]
-		}
-	}
+	wantBm.AndNot(haveBm)
 
 	return wantBm, nil
 }

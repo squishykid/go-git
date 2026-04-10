@@ -1,6 +1,9 @@
 package bitmap
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"math/bits"
+)
 
 // Bitmap is a decompressed bitmap stored as a byte slice. Bits are
 // numbered using the git pack-bitmap convention: within each 64-bit
@@ -80,6 +83,15 @@ func (b Bitmap) Xor(other Bitmap) {
 	}
 }
 
+// AndNot clears every bit in b that is set in other (b &^= other).
+// Only the first min(len(b), len(other)) bytes are affected.
+func (b Bitmap) AndNot(other Bitmap) {
+	n := min(len(b), len(other))
+	for i := range n {
+		b[i] &^= other[i]
+	}
+}
+
 // SetBitsIterator iterates over the indices of set bits in a Bitmap
 // in ascending bit-position order (git's LSB-first word convention).
 type SetBitsIterator struct {
@@ -100,9 +112,9 @@ func (b Bitmap) SetBits() *SetBitsIterator {
 func (it *SetBitsIterator) Next() (uint32, bool) {
 	for {
 		if it.rem != 0 {
-			bit := trailingZeros64(it.rem)
+			bit := bits.TrailingZeros64(it.rem)
 			it.rem &= it.rem - 1 // clear lowest set bit
-			pos := it.word*64 + uint32(bit)
+			pos := it.word*64 + uint32(bit) //nolint:gosec
 			if it.rem == 0 {
 				it.word++
 				it.advance()
@@ -127,15 +139,3 @@ func (it *SetBitsIterator) advance() {
 	it.rem = 0
 }
 
-// trailingZeros64 returns the number of trailing zero bits in x.
-func trailingZeros64(x uint64) uint32 {
-	if x == 0 {
-		return 64
-	}
-	n := uint32(0)
-	for x&1 == 0 {
-		n++
-		x >>= 1
-	}
-	return n
-}
