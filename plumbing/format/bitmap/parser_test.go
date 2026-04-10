@@ -14,7 +14,12 @@ import (
 
 func openFixture(t testing.TB) *Index {
 	t.Helper()
-	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
+	return openFixtureByURL(t, "https://github.com/go-git/go-git.git", crypto.SHA1)
+}
+
+func openFixtureByURL(t testing.TB, url string, h crypto.Hash) *Index {
+	t.Helper()
+	q := fixtures.ByTag("bitmap").ByURL(url).One()
 
 	f, err := q.Bitmap()
 	require.NoError(t, err)
@@ -23,7 +28,7 @@ func openFixture(t testing.TB) *Index {
 	data, err := io.ReadAll(f)
 	require.NoError(t, err)
 
-	idx, err := Open(data, hash.New(crypto.SHA1))
+	idx, err := Open(data, hash.New(h))
 	require.NoError(t, err)
 	return idx
 }
@@ -87,6 +92,55 @@ func TestOpenInvalidSignature(t *testing.T) {
 
 	_, err = Open(data, hash.New(crypto.SHA1))
 	assert.ErrorIs(t, err, ErrInvalidSignature)
+}
+
+func TestOpenSHA256(t *testing.T) {
+	t.Parallel()
+
+	q := fixtures.ByTag("bitmap").ByURL("https://gitlab.com/pjbgf/sha256.git").One()
+
+	f, err := q.Bitmap()
+	require.NoError(t, err)
+	defer f.Close()
+
+	data, err := io.ReadAll(f)
+	require.NoError(t, err)
+
+	idx, err := Open(data, hash.New(crypto.SHA256))
+	require.NoError(t, err)
+
+	assert.Equal(t, uint16(1), idx.Version())
+	assert.Equal(t, uint16(OptFullDAG|OptHashCache), idx.Flags())
+	assert.Equal(t, q.PackfileHash, hex.EncodeToString(idx.PackChecksum()))
+	assert.Greater(t, idx.EntryCount(), uint32(0))
+}
+
+func TestOpenEntriesSHA256(t *testing.T) {
+	t.Parallel()
+
+	idx := openFixtureByURL(t, "https://gitlab.com/pjbgf/sha256.git", crypto.SHA256)
+
+	e := idx.Entry(0)
+	assert.Greater(t, e.Bitmap.BitCount(), uint32(0))
+	assert.NotNil(t, e.Bitmap)
+}
+
+func TestSearcherReachableSHA256(t *testing.T) {
+	t.Parallel()
+
+	idx := openFixtureByURL(t, "https://gitlab.com/pjbgf/sha256.git", crypto.SHA256)
+	s := NewSearcher(idx)
+
+	e := idx.Entry(0)
+	bm, err := s.Reachable(e.ObjectPosition)
+	require.NoError(t, err)
+
+	setBits := 0
+	it := bm.SetBits()
+	for _, ok := it.Next(); ok; _, ok = it.Next() {
+		setBits++
+	}
+	assert.Greater(t, setBits, 1)
 }
 
 func BenchmarkOpen(b *testing.B) {
