@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/hash"
@@ -25,12 +26,13 @@ func NewEncoder(source PackSource, h hash.Hash) *Encoder {
 // Encode writes a complete bitmap index to w.
 //
 // packChecksum is the trailing checksum of the associated packfile.
-// commits lists the commit hashes to create bitmap entries for, in
-// the order they should appear in the file.
+// commits lists the commits to create bitmap entries for, in
+// topological order (children before parents). [SelectCommits]
+// produces this ordering.
 //
 // If old is non-nil, its precomputed reachability bitmaps are reused
 // for commits that exist in both the old and new packs.
-func (e *Encoder) Encode(w io.Writer, packChecksum []byte, commits []plumbing.Hash, old *Searcher) error {
+func (e *Encoder) Encode(w io.Writer, packChecksum []byte, commits []SelectedCommit, old *Searcher) error {
 	e.hasher.Reset()
 	hw := io.MultiWriter(w, e.hasher)
 
@@ -57,6 +59,16 @@ func (e *Encoder) Encode(w io.Writer, packChecksum []byte, commits []plumbing.Ha
 		}
 	}
 
+	// --- Topological sort ---
+	//
+	// Ensure children come before parents so that when computing a
+	// commit's reachability bitmap we can OR in already-computed
+	// parent bitmaps instead of re-walking the full history.
+	sorted, err := TopoSort(e.source, commits)
+	if err != nil {
+		return fmt.Errorf("topological sort: %w", err)
+	}
+
 	// --- Compute reachability bitmaps ---
 	type entry struct {
 		idxPos    uint32
@@ -65,20 +77,19 @@ func (e *Encoder) Encode(w io.Writer, packChecksum []byte, commits []plumbing.Ha
 		encoded   EWAH
 	}
 
-	entries := make([]entry, 0, len(commits))
-	for _, h := range commits {
-		idxPos, _, ok := e.source.FindPosition(h)
-		if !ok {
-			return fmt.Errorf("commit %s not found in pack", h)
-		}
+	computed := make(map[plumbing.Hash]Bitmap, len(sorted))
+	entries := make([]entry, 0, len(sorted))
+	slices.Reverse(sorted)
 
-		bm, err := e.reachability(h, bmLen, old)
+	for _, sc := range sorted {
+		bm, err := e.commitReachability(sc.Hash, bmLen, computed, old)
 		if err != nil {
-			return fmt.Errorf("computing reachability for %s: %w", h, err)
+			return fmt.Errorf("computing reachability for %s: %w", sc.Hash, err)
 		}
+		computed[sc.Hash] = bm
 
 		entries = append(entries, entry{
-			idxPos: idxPos,
+			idxPos: sc.IdxPos,
 			bitmap: bm,
 		})
 	}
@@ -144,14 +155,185 @@ func (e *Encoder) Encode(w io.Writer, packChecksum []byte, commits []plumbing.Ha
 
 	// --- Write file checksum ---
 	checksum := e.hasher.Sum(nil)
-	_, err := w.Write(checksum)
+	_, err = w.Write(checksum)
 	return err
+}
+
+// commitReachability computes the reachability bitmap for a single
+// commit. It walks only the commit's tree, then ORs in the bitmaps
+// of parent commits from the computed map. If old is non-nil, it is
+// checked first.
+func (e *Encoder) commitReachability(
+	commit plumbing.Hash,
+	bmLen int,
+	computed map[plumbing.Hash]Bitmap,
+	old *Searcher,
+) (Bitmap, error) {
+	// Try reusing from old bitmap.
+	if old != nil {
+		idxPos, _, ok := e.source.FindPosition(commit)
+		if ok {
+			oldBm, err := old.Reachable(idxPos)
+			if err == nil {
+				bm := make(Bitmap, bmLen)
+				copy(bm, oldBm)
+				return bm, nil
+			}
+		}
+	}
+
+	_, packPos, ok := e.source.FindPosition(commit)
+	if !ok {
+		return nil, fmt.Errorf("commit %s not found in pack", commit)
+	}
+
+	bm := make(Bitmap, bmLen)
+	bm.Set(packPos)
+
+	// Walk the commit's tree.
+	obj, err := e.source.Object(packPos)
+	if err != nil {
+		return nil, err
+	}
+	tree, parents, err := parseCommitObj(obj)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.walkTree(tree, bm); err != nil {
+		return nil, err
+	}
+
+	// OR in parent bitmaps that were already computed.
+	for _, p := range parents {
+		if pbm, ok := computed[p]; ok {
+			bm.Or(pbm)
+		} else {
+			// Parent not in the selected set — walk its full graph.
+			pbm, err := e.reachability(p, bmLen, old)
+			if err != nil {
+				return nil, err
+			}
+			bm.Or(pbm)
+		}
+	}
+
+	return bm, nil
+}
+
+// walkTree sets bits for the tree at h and all its descendants.
+func (e *Encoder) walkTree(h plumbing.Hash, bm Bitmap) error {
+	stack := []plumbing.Hash{h}
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		_, packPos, ok := e.source.FindPosition(cur)
+		if !ok {
+			continue
+		}
+		if bm.Get(packPos) {
+			continue
+		}
+		bm.Set(packPos)
+
+		obj, err := e.source.Object(packPos)
+		if err != nil {
+			return err
+		}
+		if obj.Type() == plumbing.TreeObject {
+			entries, err := parseTreeObj(obj, e.hasher.Size())
+			if err != nil {
+				return err
+			}
+			stack = append(stack, entries...)
+		}
+	}
+	return nil
 }
 
 // ErrMissingObject is returned by [SelectCommits] when a reachable
 // object is not present in the pack, violating the full-DAG closure
 // requirement.
 var ErrMissingObject = errors.New("pack missing reachable object")
+
+// TopoSort reorders commits so that children appear before their
+// parents (topological order). This is the ordering expected by
+// [Encoder.Encode] so that parent bitmaps are available when
+// computing a child's reachability.
+//
+// Only parent relationships between commits in the input set are
+// considered. Parents outside the set are ignored.
+func TopoSort(source PackSource, commits []SelectedCommit) ([]SelectedCommit, error) {
+	// Build the set of selected commits and an adjacency list of
+	// parent edges within the set.
+	idx := make(map[plumbing.Hash]int, len(commits))
+	for i, sc := range commits {
+		idx[sc.Hash] = i
+	}
+
+	// children[i] = indices of commits whose parent is commits[i].
+	children := make([][]int, len(commits))
+	// inDegree[i] = number of parents of commits[i] that are in the set.
+	inDegree := make([]int, len(commits))
+
+	for i, sc := range commits {
+		_, packPos, ok := source.FindPosition(sc.Hash)
+		if !ok {
+			continue
+		}
+		obj, err := source.Object(packPos)
+		if err != nil {
+			return nil, fmt.Errorf("reading commit %s: %w", sc.Hash, err)
+		}
+		_, parents, err := parseCommitObj(obj)
+		if err != nil {
+			return nil, fmt.Errorf("parsing commit %s: %w", sc.Hash, err)
+		}
+		for _, p := range parents {
+			if pi, ok := idx[p]; ok {
+				children[pi] = append(children[pi], i)
+				inDegree[i]++
+			}
+		}
+	}
+
+	// Kahn's algorithm: start from commits with no in-set parents
+	// (the roots / oldest commits), emit in reverse so children
+	// come first.
+	queue := make([]int, 0, len(commits))
+	for i, d := range inDegree {
+		if d == 0 {
+			queue = append(queue, i)
+		}
+	}
+
+	order := make([]SelectedCommit, 0, len(commits))
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		order = append(order, commits[cur])
+		for _, child := range children[cur] {
+			inDegree[child]--
+			if inDegree[child] == 0 {
+				queue = append(queue, child)
+			}
+		}
+	}
+
+	// Reverse: Kahn's produces parents-first; we want children-first.
+	for i, j := 0, len(order)-1; i < j; i, j = i+1, j-1 {
+		order[i], order[j] = order[j], order[i]
+	}
+
+	return order, nil
+}
+
+// SelectedCommit pairs a commit hash with its position in the pack index
+// (hash-sorted order), as needed by [Encoder.Encode].
+type SelectedCommit struct {
+	Hash   plumbing.Hash
+	IdxPos uint32
+}
 
 // SelectCommits walks the commit graph backward from the given tips
 // and returns a list of commits suitable for bitmap entries. It also
@@ -162,10 +344,10 @@ var ErrMissingObject = errors.New("pack missing reachable object")
 // when it is at least maxDistance commits from the previous selection
 // along its first-parent chain, or when it is the tip itself.
 // A maxDistance of 0 selects every commit.
-func SelectCommits(source PackSource, tips []plumbing.Hash, maxDistance int) ([]plumbing.Hash, error) {
+func SelectCommits(source PackSource, tips []plumbing.Hash, maxDistance int) ([]SelectedCommit, error) {
 	type commitInfo struct {
-		hash    plumbing.Hash
-		packPos uint32
+		hash   plumbing.Hash
+		idxPos uint32
 	}
 
 	// BFS backward from tips, collecting commits in walk order.
@@ -193,7 +375,7 @@ func SelectCommits(source PackSource, tips []plumbing.Hash, maxDistance int) ([]
 		h := queue[0]
 		queue = queue[1:]
 
-		_, packPos, ok := source.FindPosition(h)
+		idxPos, packPos, ok := source.FindPosition(h)
 		if !ok {
 			return nil, fmt.Errorf("%w: commit %s", ErrMissingObject, h)
 		}
@@ -206,7 +388,7 @@ func SelectCommits(source PackSource, tips []plumbing.Hash, maxDistance int) ([]
 			continue
 		}
 
-		commits = append(commits, commitInfo{h, packPos})
+		commits = append(commits, commitInfo{h, idxPos})
 
 		tree, parents, err := parseCommitObj(obj)
 		if err != nil {
@@ -249,10 +431,10 @@ func SelectCommits(source PackSource, tips []plumbing.Hash, maxDistance int) ([]
 	}
 
 	// Return selected commits in walk order (newest first).
-	result := make([]plumbing.Hash, 0, len(selected))
+	result := make([]SelectedCommit, 0, len(selected))
 	for _, c := range commits {
 		if _, ok := selected[c.hash]; ok {
-			result = append(result, c.hash)
+			result = append(result, SelectedCommit{Hash: c.hash, IdxPos: c.idxPos})
 		}
 	}
 	return result, nil

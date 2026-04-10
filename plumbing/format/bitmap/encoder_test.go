@@ -15,17 +15,27 @@ import (
 
 var _ = plumbing.ZeroHash // keep import
 
+// fixtureCommits returns the SelectedCommit list matching the fixture's
+// bitmap entries, suitable for passing to Encoder.Encode.
+func fixtureCommits(idx *Index, src *testPackSource) []SelectedCommit {
+	commits := make([]SelectedCommit, idx.EntryCount())
+	for i := range commits {
+		pos := idx.entries.commitPosition(i)
+		commits[i] = SelectedCommit{
+			Hash:   src.hashAtIdx(pos),
+			IdxPos: pos,
+		}
+	}
+	return commits
+}
+
 func TestEncodeRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	bitmapIdx := openFixture(t)
 	src := openPackSource(t)
 
-	// Collect the commit hashes from the existing fixture's entries.
-	commits := make([]plumbing.Hash, bitmapIdx.EntryCount())
-	for i := range commits {
-		commits[i] = src.hashAtIdx(bitmapIdx.entries.commitPosition(i))
-	}
+	commits := fixtureCommits(bitmapIdx, src)
 
 	packChecksum := bitmapIdx.PackChecksum()
 
@@ -57,10 +67,7 @@ func TestEncodeMatchesFixture(t *testing.T) {
 	bitmapIdx := openFixture(t)
 	src := openPackSource(t)
 
-	commits := make([]plumbing.Hash, bitmapIdx.EntryCount())
-	for i := range commits {
-		commits[i] = src.hashAtIdx(bitmapIdx.entries.commitPosition(i))
-	}
+	commits := fixtureCommits(bitmapIdx, src)
 
 	enc := NewEncoder(src, hash.New(crypto.SHA1))
 	var buf bytes.Buffer
@@ -73,17 +80,17 @@ func TestEncodeMatchesFixture(t *testing.T) {
 	origSearcher := NewSearcher(bitmapIdx)
 	newSearcher := NewSearcher(result)
 
-	// Every entry's resolved reachability must match.
+	// Every original entry's reachability must match in the new bitmap.
+	// Entry ordering may differ (topological sort), so look up by
+	// commit position rather than comparing entry-by-entry.
 	for i := range int(bitmapIdx.EntryCount()) {
-		origPos := bitmapIdx.entries.commitPosition(i)
-		origBm, err := origSearcher.Reachable(origPos)
-		require.NoError(t, err, "entry %d", i)
+		pos := bitmapIdx.entries.commitPosition(i)
+		origBm, err := origSearcher.Reachable(pos)
+		require.NoError(t, err, "orig entry %d", i)
 
-		newPos := result.entries.commitPosition(i)
-		newBm, err := newSearcher.Reachable(newPos)
-		require.NoError(t, err, "entry %d", i)
+		newBm, err := newSearcher.Reachable(pos)
+		require.NoError(t, err, "new entry for pos %d", pos)
 
-		assert.Equal(t, origPos, newPos, "entry %d commit position", i)
 		assertBitmapsEqual(t, origBm, newBm)
 	}
 }
@@ -94,10 +101,7 @@ func TestEncodeSHA256(t *testing.T) {
 	bitmapIdx := openFixtureByURL(t, "https://gitlab.com/pjbgf/sha256.git", crypto.SHA256)
 	src := openPackSourceByURL(t, "https://gitlab.com/pjbgf/sha256.git", crypto.SHA256)
 
-	commits := make([]plumbing.Hash, bitmapIdx.EntryCount())
-	for i := range commits {
-		commits[i] = src.hashAtIdx(bitmapIdx.entries.commitPosition(i))
-	}
+	commits := fixtureCommits(bitmapIdx, src)
 
 	enc := NewEncoder(src, hash.New(crypto.SHA256))
 	var buf bytes.Buffer
@@ -113,9 +117,10 @@ func TestEncodeSHA256(t *testing.T) {
 	newSearcher := NewSearcher(result)
 
 	for i := range int(bitmapIdx.EntryCount()) {
-		origBm, err := origSearcher.Reachable(bitmapIdx.entries.commitPosition(i))
+		pos := bitmapIdx.entries.commitPosition(i)
+		origBm, err := origSearcher.Reachable(pos)
 		require.NoError(t, err)
-		newBm, err := newSearcher.Reachable(result.entries.commitPosition(i))
+		newBm, err := newSearcher.Reachable(pos)
 		require.NoError(t, err)
 		assertBitmapsEqual(t, origBm, newBm)
 	}
@@ -137,13 +142,14 @@ func TestSelectCommits(t *testing.T) {
 	assert.Greater(t, len(commits), 100)
 
 	// The tip must be the first entry.
-	assert.Equal(t, head, commits[0])
+	assert.Equal(t, head, commits[0].Hash)
 
-	// Every selected hash must be a commit in the pack.
-	for _, h := range commits[:10] {
-		_, packPos, ok := src.FindPosition(h)
+	// Every selected entry must be a commit with a valid idx position.
+	for _, sc := range commits[:10] {
+		_, packPos, ok := src.FindPosition(sc.Hash)
 		require.True(t, ok)
 		assert.Equal(t, plumbing.CommitObject, src.ObjectType(packPos))
+		assert.Equal(t, sc.IdxPos, src.offsetToIdx[packPos])
 	}
 }
 
@@ -164,9 +170,50 @@ func TestSelectCommitsDistance(t *testing.T) {
 	// Sparse selection should have fewer commits.
 	assert.Less(t, len(sparse), len(all))
 	// But should still include the tip.
-	assert.Equal(t, head, sparse[0])
+	assert.Equal(t, head, sparse[0].Hash)
 
 	t.Logf("all=%d sparse=%d", len(all), len(sparse))
+}
+
+func TestTopoSort(t *testing.T) {
+	t.Parallel()
+
+	bitmapIdx := openFixture(t)
+	src := openPackSource(t)
+
+	head := src.hashAtIdx(bitmapIdx.entries.commitPosition(0))
+	commits, err := SelectCommits(src, []plumbing.Hash{head}, 0)
+	require.NoError(t, err)
+
+	sorted, err := TopoSort(src, commits)
+	require.NoError(t, err)
+	assert.Equal(t, len(commits), len(sorted))
+
+	// Build position map: for each commit, record its index in the
+	// sorted output.
+	pos := make(map[plumbing.Hash]int, len(sorted))
+	for i, sc := range sorted {
+		pos[sc.Hash] = i
+	}
+
+	// Verify: every commit must appear before its parents in the
+	// sorted output (lower index = earlier in slice = child).
+	for _, sc := range sorted {
+		_, packPos, ok := src.FindPosition(sc.Hash)
+		require.True(t, ok)
+		obj, err := src.Object(packPos)
+		require.NoError(t, err)
+		_, parents, err := parseCommitObj(obj)
+		require.NoError(t, err)
+
+		for _, p := range parents {
+			if pi, ok := pos[p]; ok {
+				assert.Greater(t, pi, pos[sc.Hash],
+					"commit %s (pos %d) should appear before parent %s (pos %d)",
+					sc.Hash, pos[sc.Hash], p, pi)
+			}
+		}
+	}
 }
 
 func TestSelectCommitsMissingObject(t *testing.T) {
@@ -238,10 +285,7 @@ func BenchmarkEncodeReuse(b *testing.B) {
 	src := openPackSource(b)
 	old := NewSearcher(bitmapIdx)
 
-	commits := make([]plumbing.Hash, bitmapIdx.EntryCount())
-	for i := range commits {
-		commits[i] = src.hashAtIdx(bitmapIdx.entries.commitPosition(i))
-	}
+	commits := fixtureCommits(bitmapIdx, src)
 	packChecksum := bitmapIdx.PackChecksum()
 
 	b.ResetTimer()
@@ -258,10 +302,7 @@ func BenchmarkEncode(b *testing.B) {
 	bitmapIdx := openFixture(b)
 	src := openPackSource(b)
 
-	commits := make([]plumbing.Hash, bitmapIdx.EntryCount())
-	for i := range commits {
-		commits[i] = src.hashAtIdx(bitmapIdx.entries.commitPosition(i))
-	}
+	commits := fixtureCommits(bitmapIdx, src)
 	packChecksum := bitmapIdx.PackChecksum()
 
 	b.ResetTimer()
