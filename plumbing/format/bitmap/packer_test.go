@@ -205,6 +205,43 @@ func TestPackerNegotiate(t *testing.T) {
 	assert.Equal(t, expected, bm)
 }
 
+func TestReachabilityMissing(t *testing.T) {
+	t.Parallel()
+
+	bitmapIdx := openFixture(t)
+	src := openPackSource(t)
+	s := NewSearcher(bitmapIdx)
+	p := NewPacker(s, src, hash.New(crypto.SHA1))
+
+	e0 := bitmapIdx.Entry(0)
+	valid := src.hashAtIdx(e0.ObjectPosition)
+	bogus1, _ := plumbing.FromHex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	bogus2, _ := plumbing.FromHex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+
+	// Reachability should succeed and report the bogus hashes as missing.
+	bm, missing, err := p.Reachability([]plumbing.Hash{valid, bogus1, bogus2})
+	require.NoError(t, err)
+
+	// The valid commit's reachability bitmap should be populated.
+	setBits := 0
+	it := bm.SetBits()
+	for _, ok := it.Next(); ok; _, ok = it.Next() {
+		setBits++
+	}
+	assert.Greater(t, setBits, 10)
+
+	// Both bogus hashes should be in the missing slice.
+	missingSet := make(map[string]struct{}, len(missing))
+	for _, h := range missing {
+		missingSet[h.String()] = struct{}{}
+	}
+	assert.Contains(t, missingSet, bogus1.String())
+	assert.Contains(t, missingSet, bogus2.String())
+
+	// The valid hash should NOT be in missing.
+	assert.NotContains(t, missingSet, valid.String())
+}
+
 func TestPackerNegotiateWithHaves(t *testing.T) {
 	t.Parallel()
 
