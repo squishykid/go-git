@@ -55,19 +55,32 @@ func (s *testPackSource) Object(packPos uint32) (plumbing.EncodedObject, error) 
 	return s.pf.Get(s.idxToHash[idxPos])
 }
 
+func (s *testPackSource) ObjectType(packPos uint32) plumbing.ObjectType {
+	obj, err := s.Object(packPos)
+	if err != nil {
+		return plumbing.InvalidObject
+	}
+	return obj.Type()
+}
+
 const revFileHeader = 12 // 4 sig + 4 version + 4 hash version
 
 func openPackSource(t testing.TB) *testPackSource {
 	t.Helper()
-	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
+	return openPackSourceByURL(t, "https://github.com/go-git/go-git.git", crypto.SHA1)
+}
+
+func openPackSourceByURL(t testing.TB, url string, h crypto.Hash) *testPackSource {
+	t.Helper()
+	q := fixtures.ByTag("bitmap").ByURL(url).One()
 
 	// Decode pack index.
 	idxFile, err := q.Idx()
 	require.NoError(t, err)
 	defer idxFile.Close()
 
-	idx := idxfile.NewMemoryIndex(crypto.SHA1.Size())
-	require.NoError(t, idxfile.NewDecoder(idxFile, hash.New(crypto.SHA1)).Decode(idx))
+	idx := idxfile.NewMemoryIndex(h.Size())
+	require.NoError(t, idxfile.NewDecoder(idxFile, hash.New(h)).Decode(idx))
 
 	count, err := idx.Count()
 	require.NoError(t, err)

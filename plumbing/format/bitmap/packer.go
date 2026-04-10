@@ -27,6 +27,8 @@ type PackSource interface {
 	// Object returns the encoded object at the given pack-offset position.
 	// The returned object must have resolved (non-delta) content.
 	Object(packPos uint32) (plumbing.EncodedObject, error)
+	// ObjectType returns the object type at the given pack-offset position.
+	ObjectType(packPos uint32) plumbing.ObjectType
 }
 
 // Packer uses bitmap reachability data to efficiently build a packfile

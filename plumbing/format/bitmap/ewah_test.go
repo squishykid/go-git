@@ -147,6 +147,104 @@ func TestDecodeEWAH(t *testing.T) {
 	})
 }
 
+func TestEncodeEWAH(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
+		bm := Bitmap{}
+		encoded := EncodeEWAH(bm)
+		assert.Equal(t, uint32(0), encoded.BitCount())
+
+		decoded, err := DecodeEWAH(encoded)
+		require.NoError(t, err)
+		assert.Equal(t, Bitmap{}, decoded)
+	})
+
+	t.Run("all zeros", func(t *testing.T) {
+		t.Parallel()
+		bm := make(Bitmap, 16) // 128 bits, all zero
+		encoded := EncodeEWAH(bm)
+		assert.Equal(t, uint32(0), encoded.BitCount())
+
+		decoded, err := DecodeEWAH(encoded)
+		require.NoError(t, err)
+		assert.Equal(t, Bitmap{}, decoded)
+	})
+
+	t.Run("all ones", func(t *testing.T) {
+		t.Parallel()
+		bm := make(Bitmap, 8) // 64 bits
+		for i := range bm {
+			bm[i] = 0xFF
+		}
+		encoded := EncodeEWAH(bm)
+
+		decoded, err := DecodeEWAH(encoded)
+		require.NoError(t, err)
+		assert.Equal(t, bm, decoded)
+	})
+
+	t.Run("sparse", func(t *testing.T) {
+		t.Parallel()
+		bm := make(Bitmap, 64) // 512 bits
+		bm.Set(0)
+		bm.Set(100)
+		bm.Set(500)
+		encoded := EncodeEWAH(bm)
+
+		decoded, err := DecodeEWAH(encoded)
+		require.NoError(t, err)
+		assert.True(t, decoded.Get(0))
+		assert.True(t, decoded.Get(100))
+		assert.True(t, decoded.Get(500))
+		assert.False(t, decoded.Get(1))
+		assert.False(t, decoded.Get(101))
+	})
+
+	t.Run("mixed fills and literals", func(t *testing.T) {
+		t.Parallel()
+		// 256 bits: 64 ones + 64 zeros + 64 literal + 64 ones
+		bm := make(Bitmap, 32)
+		// Word 0: all ones
+		for i := 0; i < 8; i++ {
+			bm[i] = 0xFF
+		}
+		// Word 1: all zeros (already zero)
+		// Word 2: literal pattern
+		bm.Set(128)
+		bm.Set(191)
+		// Word 3: all ones
+		for i := 24; i < 32; i++ {
+			bm[i] = 0xFF
+		}
+
+		encoded := EncodeEWAH(bm)
+
+		decoded, err := DecodeEWAH(encoded)
+		require.NoError(t, err)
+		assert.Equal(t, bm, decoded)
+	})
+
+	t.Run("fixture round-trip", func(t *testing.T) {
+		t.Parallel()
+		// Decompress a real bitmap entry, re-encode, decode again.
+		idx := openFixture(t)
+		e := idx.Entry(0)
+
+		original, err := DecodeEWAH(e.Bitmap)
+		require.NoError(t, err)
+
+		reencoded := EncodeEWAH(original)
+		decoded, err := DecodeEWAH(reencoded)
+		require.NoError(t, err)
+
+		// The decoded bitmap may be shorter (trailing zeros trimmed)
+		// but all set bit positions must match.
+		assertBitmapsEqual(t, original, decoded)
+	})
+}
+
 func TestBitmapGet(t *testing.T) {
 	t.Parallel()
 
@@ -219,6 +317,19 @@ func TestSetBitsIterator(t *testing.T) {
 		assert.Equal(t, uint32(0), got[0])
 		assert.Equal(t, uint32(63), got[63])
 	})
+}
+
+// assertBitmapsEqual checks that two bitmaps have the same set bits,
+// ignoring any trailing zero bytes that may differ in length.
+func assertBitmapsEqual(t *testing.T, a, b Bitmap) {
+	t.Helper()
+	n := max(a.Bits(), b.Bits())
+	for i := uint32(0); i < n; i++ {
+		if a.Get(i) != b.Get(i) {
+			t.Errorf("bit %d: a=%v b=%v", i, a.Get(i), b.Get(i))
+			return
+		}
+	}
 }
 
 // rlw builds a Running Length Word.
