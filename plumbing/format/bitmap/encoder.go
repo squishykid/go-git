@@ -2,6 +2,7 @@ package bitmap
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
@@ -145,6 +146,150 @@ func (e *Encoder) Encode(w io.Writer, packChecksum []byte, commits []plumbing.Ha
 	checksum := e.hasher.Sum(nil)
 	_, err := w.Write(checksum)
 	return err
+}
+
+// ErrMissingObject is returned by [SelectCommits] when a reachable
+// object is not present in the pack, violating the full-DAG closure
+// requirement.
+var ErrMissingObject = errors.New("pack missing reachable object")
+
+// SelectCommits walks the commit graph backward from the given tips
+// and returns a list of commits suitable for bitmap entries. It also
+// verifies that the pack has full closure: every object reachable
+// from the selected commits must be in the pack.
+//
+// The selection uses a distance-based heuristic: a commit is selected
+// when it is at least maxDistance commits from the previous selection
+// along its first-parent chain, or when it is the tip itself.
+// A maxDistance of 0 selects every commit.
+func SelectCommits(source PackSource, tips []plumbing.Hash, maxDistance int) ([]plumbing.Hash, error) {
+	type commitInfo struct {
+		hash    plumbing.Hash
+		packPos uint32
+	}
+
+	// BFS backward from tips, collecting commits in walk order.
+	var commits []commitInfo
+	visited := make(map[plumbing.Hash]struct{})
+
+	queue := make([]plumbing.Hash, 0, len(tips))
+	for _, h := range tips {
+		if _, seen := visited[h]; !seen {
+			visited[h] = struct{}{}
+			queue = append(queue, h)
+		}
+	}
+
+	hashSize := 20 // default SHA-1
+	if source.ObjectCount() > 0 {
+		// Detect hash size from the first object.
+		obj, err := source.Object(0)
+		if err == nil {
+			hashSize = obj.Hash().Size()
+		}
+	}
+
+	for len(queue) > 0 {
+		h := queue[0]
+		queue = queue[1:]
+
+		_, packPos, ok := source.FindPosition(h)
+		if !ok {
+			return nil, fmt.Errorf("%w: commit %s", ErrMissingObject, h)
+		}
+
+		obj, err := source.Object(packPos)
+		if err != nil {
+			return nil, fmt.Errorf("reading commit %s: %w", h, err)
+		}
+		if obj.Type() != plumbing.CommitObject {
+			continue
+		}
+
+		commits = append(commits, commitInfo{h, packPos})
+
+		tree, parents, err := parseCommitObj(obj)
+		if err != nil {
+			return nil, fmt.Errorf("parsing commit %s: %w", h, err)
+		}
+
+		// Verify the tree (and its children) are in the pack.
+		if err := verifyReachable(source, tree, visited, hashSize); err != nil {
+			return nil, err
+		}
+
+		for _, p := range parents {
+			if _, seen := visited[p]; !seen {
+				visited[p] = struct{}{}
+				queue = append(queue, p)
+			}
+		}
+	}
+
+	// Select commits using distance heuristic.
+	// Walk in reverse (oldest first) so selections propagate forward.
+	selected := make(map[plumbing.Hash]struct{})
+	distSinceSelected := maxDistance // force-select the first (oldest) commit
+
+	for i := len(commits) - 1; i >= 0; i-- {
+		c := commits[i]
+		isTip := false
+		for _, t := range tips {
+			if c.hash == t {
+				isTip = true
+				break
+			}
+		}
+
+		distSinceSelected++
+		if isTip || maxDistance == 0 || distSinceSelected >= maxDistance {
+			selected[c.hash] = struct{}{}
+			distSinceSelected = 0
+		}
+	}
+
+	// Return selected commits in walk order (newest first).
+	result := make([]plumbing.Hash, 0, len(selected))
+	for _, c := range commits {
+		if _, ok := selected[c.hash]; ok {
+			result = append(result, c.hash)
+		}
+	}
+	return result, nil
+}
+
+// verifyReachable checks that the tree at h and all its descendants
+// are in the pack. It adds verified hashes to visited.
+func verifyReachable(source PackSource, h plumbing.Hash, visited map[plumbing.Hash]struct{}, hashSize int) error {
+	stack := []plumbing.Hash{h}
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		if _, seen := visited[cur]; seen {
+			continue
+		}
+		visited[cur] = struct{}{}
+
+		_, packPos, ok := source.FindPosition(cur)
+		if !ok {
+			return fmt.Errorf("%w: %s", ErrMissingObject, cur)
+		}
+
+		obj, err := source.Object(packPos)
+		if err != nil {
+			return fmt.Errorf("reading object %s: %w", cur, err)
+		}
+
+		if obj.Type() == plumbing.TreeObject {
+			entries, err := parseTreeObj(obj, hashSize)
+			if err != nil {
+				return fmt.Errorf("parsing tree %s: %w", cur, err)
+			}
+			stack = append(stack, entries...)
+		}
+	}
+	return nil
 }
 
 // reachability computes the full reachability bitmap for a commit.
