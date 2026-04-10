@@ -26,7 +26,7 @@ func NewSearcher(bitmapIdx *Index) *Searcher {
 	entryCount := int(bitmapIdx.EntryCount())
 	entryIndex := make(map[uint32]int, entryCount)
 	for i := range entryCount {
-		entryIndex[bitmapIdx.Entry(i).ObjectPosition] = i
+		entryIndex[bitmapIdx.entries.commitPosition(i)] = i
 	}
 
 	return &Searcher{
@@ -64,14 +64,9 @@ func (s *Searcher) resolve(ordinal int) (Bitmap, error) {
 		}
 		chain = append(chain, cur)
 
-		e := s.idx.Entry(cur)
-		if e.XOROffset == 0 {
-			break
-		}
-		base := cur - int(e.XOROffset)
+		base := s.idx.entries.xorBase(cur)
 		if base < 0 {
-			return nil, fmt.Errorf("%w: entry %d references offset %d",
-				ErrInvalidXOROffset, cur, e.XOROffset)
+			break
 		}
 		cur = base
 	}
@@ -87,8 +82,7 @@ func (s *Searcher) resolve(ordinal int) (Bitmap, error) {
 			return nil, fmt.Errorf("decompressing entry %d: %w", cur, err)
 		}
 
-		if e.XOROffset > 0 {
-			base := cur - int(e.XOROffset)
+		if base := s.idx.entries.xorBase(cur); base >= 0 {
 			bm = Extend(bm, s.cache[base])
 			bm.Xor(s.cache[base])
 		}

@@ -1,9 +1,6 @@
 package bitmap
 
-import (
-	"encoding/binary"
-	"errors"
-)
+import "encoding/binary"
 
 const (
 	// VersionSupported is the only bitmap index version supported.
@@ -20,21 +17,28 @@ const (
 	OptHashCache = 0x4
 )
 
-// ErrInvalidXOROffset is returned when a bitmap entry references
-// an XOR offset that is out of range.
-var ErrInvalidXOROffset = errors.New("bitmap entry has invalid XOR offset")
-
 var bitmapHeader = []byte{'B', 'I', 'T', 'M'}
 
 // headerFixedSize is the fixed portion of the header before the pack
 // checksum: 4 (sig) + 2 (version) + 2 (flags) + 4 (entry count).
 const headerFixedSize = 12
 
-// entryLookup maps an entry ordinal to the byte offset within the
-// bitmap file where that entry begins.
+// entryLookup provides random access to bitmap entries by ordinal.
+// The default implementation ([scannedOffsets]) is built by scanning
+// entries during [Open]. A future implementation backed by the
+// BITMAP_OPT_LOOKUP_TABLE extension (flag 0x10) can satisfy the same
+// interface without the upfront scan.
 type entryLookup interface {
-	// entryOffset returns the byte offset of the i-th entry.
-	entryOffset(i int) uint32
+	// entryOffset returns the byte offset of the i-th entry within
+	// the bitmap file. The lookup table extension stores this as a
+	// uint64; scannedOffsets narrows it to uint32.
+	entryOffset(i int) uint64
+	// commitPosition returns the pack-index position of the commit
+	// for the i-th entry.
+	commitPosition(i int) uint32
+	// xorBase returns the ordinal of the entry that the i-th entry
+	// is XOR'd against, or -1 if the entry has no XOR dependency.
+	xorBase(i int) int
 	// count returns the number of entries.
 	count() int
 }
@@ -102,21 +106,44 @@ func (idx *Index) typeBitmap(i int) EWAH {
 // Entry returns the i-th per-commit bitmap entry. The offset is
 // looked up from the entry table built during [Open], so this is O(1).
 func (idx *Index) Entry(i int) Entry {
-	return parseEntry(idx.b[idx.entries.entryOffset(i):])
+	off := idx.entries.entryOffset(i)
+	return parseEntry(idx.b[off:])
 }
 
 // scannedOffsets is the default entryLookup built by scanning through
-// the variable-length entries once during [Open].
-type scannedOffsets []uint32
+// the variable-length entries once during [Open]. It stores the byte
+// offset of each entry and reads other fields from the raw data on
+// demand.
+type scannedOffsets struct {
+	offsets []uint32 // byte offset of each entry
+	data    []byte   // reference to the full bitmap file bytes
+}
 
-func (s scannedOffsets) entryOffset(i int) uint32 { return s[i] }
-func (s scannedOffsets) count() int               { return len(s) }
+func (s *scannedOffsets) entryOffset(i int) uint64  { return uint64(s.offsets[i]) }
+func (s *scannedOffsets) count() int                { return len(s.offsets) }
+
+func (s *scannedOffsets) commitPosition(i int) uint32 {
+	off := s.offsets[i]
+	return binary.BigEndian.Uint32(s.data[off : off+4])
+}
+
+func (s *scannedOffsets) xorBase(i int) int {
+	off := s.offsets[i]
+	xorOffset := s.data[off+4]
+	if xorOffset == 0 {
+		return -1
+	}
+	return i - int(xorOffset)
+}
 
 // buildEntryOffsets scans the variable-length entries once and records
 // the byte offset of each entry. Called during [Open].
 func (idx *Index) buildEntryOffsets() {
 	n := int(idx.EntryCount())
-	offsets := make(scannedOffsets, n)
+	offsets := &scannedOffsets{
+		offsets: make([]uint32, n),
+		data:    idx.b,
+	}
 
 	off := headerFixedSize + idx.hashSize
 	for range 4 {
@@ -124,7 +151,7 @@ func (idx *Index) buildEntryOffsets() {
 	}
 
 	for i := range n {
-		offsets[i] = uint32(off)
+		offsets.offsets[i] = uint32(off)
 		off += entrySize(idx.b[off:])
 	}
 
