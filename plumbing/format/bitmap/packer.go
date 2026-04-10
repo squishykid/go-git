@@ -96,41 +96,43 @@ func (p *Packer) Reachability(hashes []plumbing.Hash) (Bitmap, error) {
 	n := p.source.ObjectCount()
 	bmLen := ((n + 63) / 64) * 8
 	bm := make(Bitmap, bmLen)
-	visited := make(map[plumbing.Hash]struct{})
 
-	queue := make([]plumbing.Hash, len(hashes))
-	copy(queue, hashes)
+	// Resolve input hashes to positions up front so the main loop
+	// only works with integer positions — no hash lookups.
+	queue := make([]objPos, 0, len(hashes))
+	for _, h := range hashes {
+		idxPos, packPos, ok := p.source.FindPosition(h)
+		if ok {
+			queue = append(queue, objPos{idxPos, packPos})
+		}
+	}
 
 	for len(queue) > 0 {
-		h := queue[0]
+		cur := queue[0]
 		queue = queue[1:]
 
-		if _, seen := visited[h]; seen {
-			continue
-		}
-		visited[h] = struct{}{}
-
-		idxPos, packPos, ok := p.source.FindPosition(h)
-		if !ok {
+		// Use the result bitmap itself as the visited set: if a
+		// bit is already set (from a previous walk step or an ORed
+		// precomputed bitmap) the object can be skipped.
+		if bm.Get(cur.packPos) {
 			continue
 		}
 
 		// Fast path: use precomputed bitmap when available.
 		// Searcher is keyed by idx position (Entry.ObjectPosition).
-		reachBm, err := p.searcher.Reachable(idxPos)
+		reachBm, err := p.searcher.Reachable(cur.idxPos)
 		if err == nil {
 			bm.Or(reachBm)
 			continue
 		}
 		if !errors.Is(err, ErrNoEntry) {
-			return nil, fmt.Errorf("hash %s: %w", h, err)
+			return nil, fmt.Errorf("position %d: %w", cur.packPos, err)
 		}
 
 		// No precomputed bitmap — mark this object and enqueue children.
-		// Bitmap bits use pack-offset position.
-		bm.Set(packPos)
+		bm.Set(cur.packPos)
 
-		obj, err := p.source.Object(packPos)
+		obj, err := p.source.Object(cur.packPos)
 		if err != nil {
 			return nil, err
 		}
@@ -139,28 +141,46 @@ func (p *Packer) Reachability(hashes []plumbing.Hash) (Bitmap, error) {
 		case plumbing.CommitObject:
 			tree, parents, err := parseCommitObj(obj)
 			if err != nil {
-				return nil, fmt.Errorf("parsing commit %s: %w", h, err)
+				return nil, fmt.Errorf("parsing commit at %d: %w", cur.packPos, err)
 			}
-			queue = append(queue, tree)
-			queue = append(queue, parents...)
+			queue = p.resolve(queue, tree)
+			queue = p.resolve(queue, parents...)
 
 		case plumbing.TreeObject:
 			entries, err := parseTreeObj(obj, p.hasher.Size())
 			if err != nil {
-				return nil, fmt.Errorf("parsing tree %s: %w", h, err)
+				return nil, fmt.Errorf("parsing tree at %d: %w", cur.packPos, err)
 			}
-			queue = append(queue, entries...)
+			queue = p.resolve(queue, entries...)
 
 		case plumbing.TagObject:
 			target, err := parseTagObj(obj)
 			if err != nil {
-				return nil, fmt.Errorf("parsing tag %s: %w", h, err)
+				return nil, fmt.Errorf("parsing tag at %d: %w", cur.packPos, err)
 			}
-			queue = append(queue, target)
+			queue = p.resolve(queue, target)
 		}
 	}
 
 	return bm, nil
+}
+
+// objPos holds the two position spaces for an object in the pack.
+type objPos struct {
+	idxPos  uint32 // hash-sorted order (for Searcher)
+	packPos uint32 // pack-offset order (for bitmaps)
+}
+
+// resolve maps hashes to positions and appends them to the queue,
+// silently dropping hashes not in the pack.
+func (p *Packer) resolve(queue []objPos, hashes ...plumbing.Hash) []objPos {
+	for _, h := range hashes {
+		idxPos, packPos, ok := p.source.FindPosition(h)
+		if ok {
+			queue = append(queue, objPos{idxPos, packPos})
+		}
+	}
+	return queue
 }
 
 // parseCommitObj extracts the tree hash and parent hashes from a
