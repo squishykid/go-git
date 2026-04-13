@@ -10,6 +10,14 @@ import (
 // word (stored big-endian) bit 0 is the least-significant bit.
 type Bitmap []byte
 
+// NewBitmap allocates a zero-initialised Bitmap wide enough to hold
+// objectCount bits. The underlying slice is rounded up to a 64-bit
+// word boundary so Get/Set can address every bit without special
+// handling of a partial final word.
+func NewBitmap(objectCount int) Bitmap {
+	return make(Bitmap, ((objectCount+63)/64)*8)
+}
+
 // Get returns the value of the bit at position pos.
 func (b Bitmap) Get(pos uint32) bool {
 	wordIdx := pos / 64

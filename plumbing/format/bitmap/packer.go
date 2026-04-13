@@ -2,8 +2,6 @@ package bitmap
 
 import (
 	"bytes"
-	"compress/zlib"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -48,16 +46,6 @@ func NewPacker(s *Searcher, source PackSource, h hash.Hash) *Packer {
 		source:   source,
 		hasher:   h,
 	}
-}
-
-// Pack writes a packfile to w containing all objects reachable from
-// wants but not reachable from haves. It returns the packfile checksum.
-func (p *Packer) Pack(w io.Writer, wants, haves []plumbing.Hash) (plumbing.Hash, error) {
-	bm, err := p.Negotiate(wants, haves)
-	if err != nil {
-		return plumbing.ZeroHash, err
-	}
-	return p.WritePack(w, bm)
 }
 
 // Negotiate computes the bitmap of objects reachable from wants but
@@ -292,108 +280,4 @@ func parseTreeObj(obj plumbing.EncodedObject, hashSize int) ([]plumbing.Hash, er
 		data = data[nul+1+hashSize:]
 	}
 	return hashes, nil
-}
-
-// WritePack writes a complete packfile containing all objects whose
-// bits are set in bm. Returns the packfile checksum.
-func (p *Packer) WritePack(w io.Writer, bm Bitmap) (plumbing.Hash, error) {
-	// Collect positions of set bits, ignoring any padding beyond
-	// the actual object count (EWAH bitmaps are word-aligned).
-	maxPos := uint32(p.source.ObjectCount())
-	var positions []uint32
-	it := bm.SetBits()
-	for pos, ok := it.Next(); ok; pos, ok = it.Next() {
-		if pos < maxPos {
-			positions = append(positions, pos)
-		}
-	}
-
-	p.hasher.Reset()
-	hw := io.MultiWriter(w, p.hasher)
-
-	if err := writePackHeader(hw, len(positions)); err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("writing pack header: %w", err)
-	}
-
-	for _, pos := range positions {
-		if err := p.writeObject(hw, pos); err != nil {
-			return plumbing.ZeroHash, fmt.Errorf("writing object at position %d: %w", pos, err)
-		}
-	}
-
-	// Footer: pack checksum (not included in the hash itself).
-	checksum, ok := plumbing.FromBytes(p.hasher.Sum(nil))
-	if !ok {
-		return plumbing.ZeroHash, fmt.Errorf("invalid checksum length")
-	}
-	if _, err := checksum.WriteTo(w); err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("writing checksum: %w", err)
-	}
-
-	return checksum, nil
-}
-
-// writeObject writes a single non-delta packfile entry for the object
-// at the given pack index position.
-func (p *Packer) writeObject(w io.Writer, idxPos uint32) error {
-	obj, err := p.source.Object(idxPos)
-	if err != nil {
-		return err
-	}
-
-	if err := writeEntryHeader(w, obj.Type(), obj.Size()); err != nil {
-		return err
-	}
-
-	r, err := obj.Reader()
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-
-	zw := zlib.NewWriter(w)
-	if _, err := io.Copy(zw, r); err != nil {
-		zw.Close()
-		return err
-	}
-	return zw.Close()
-}
-
-const (
-	packVersion     = 2
-	firstLenBits    = 4
-	contLenBits     = 7
-	maskFirstLen    = 0x0F
-	maskContinueBit = 0x80
-	maskContLen     = 0x7F
-)
-
-var packSignature = [4]byte{'P', 'A', 'C', 'K'}
-
-func writePackHeader(w io.Writer, count int) error {
-	var buf [12]byte
-	copy(buf[0:4], packSignature[:])
-	binary.BigEndian.PutUint32(buf[4:8], packVersion)
-	binary.BigEndian.PutUint32(buf[8:12], uint32(count))
-	_, err := w.Write(buf[:])
-	return err
-}
-
-func writeEntryHeader(w io.Writer, t plumbing.ObjectType, size int64) error {
-	c := (int64(t) << firstLenBits) | (size & maskFirstLen)
-	size >>= firstLenBits
-
-	var buf [20]byte
-	n := 0
-	for size != 0 {
-		buf[n] = byte(c) | maskContinueBit
-		n++
-		c = size & maskContLen
-		size >>= contLenBits
-	}
-	buf[n] = byte(c)
-	n++
-
-	_, err := w.Write(buf[:n])
-	return err
 }

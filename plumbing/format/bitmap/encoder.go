@@ -8,19 +8,55 @@ import (
 	"slices"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/format/idxfile"
 	"github.com/go-git/go-git/v6/plumbing/hash"
+	"github.com/go-git/go-git/v6/plumbing/storer"
 )
 
 // Encoder writes pack bitmap index files.
 type Encoder struct {
-	source PackSource
-	hasher hash.Hash
+	index *idxfile.MemoryIndex
+}
+
+type PackfileEntry struct {
+	Hash plumbing.Hash
 }
 
 // NewEncoder creates an Encoder that reads objects from source and uses
 // h for the file checksum.
-func NewEncoder(source PackSource, h hash.Hash) *Encoder {
-	return &Encoder{source: source, hasher: h}
+func NewEncoder(index *idxfile.MemoryIndex) *Encoder {
+	return &Encoder{index: index}
+}
+
+func (e *Encoder) typeBitmaps() ([4]EWAH, error) {
+	typeBitmaps := [4]Bitmap{
+		NewBitmap(len(e.entries)),
+		NewBitmap(len(e.entries)),
+		NewBitmap(len(e.entries)),
+		NewBitmap(len(e.entries)),
+	}
+	for pos, entry := range e.entries {
+		o, err := e.s.EncodedObject(plumbing.AnyObject, entry.Hash)
+		if err != nil {
+			return [4]EWAH{}, err
+		}
+		switch o.Type() {
+		case plumbing.CommitObject:
+			typeBitmaps[0].Set(uint32(pos))
+		case plumbing.TreeObject:
+			typeBitmaps[1].Set(uint32(pos))
+		case plumbing.BlobObject:
+			typeBitmaps[2].Set(uint32(pos))
+		case plumbing.TagObject:
+			typeBitmaps[3].Set(uint32(pos))
+		}
+	}
+	return [4]EWAH{
+		EncodeEWAH(typeBitmaps[0]),
+		EncodeEWAH(typeBitmaps[1]),
+		EncodeEWAH(typeBitmaps[2]),
+		EncodeEWAH(typeBitmaps[3]),
+	}, nil
 }
 
 // Encode writes a complete bitmap index to w.
@@ -32,31 +68,19 @@ func NewEncoder(source PackSource, h hash.Hash) *Encoder {
 //
 // If old is non-nil, its precomputed reachability bitmaps are reused
 // for commits that exist in both the old and new packs.
-func (e *Encoder) Encode(w io.Writer, packChecksum []byte, commits []SelectedCommit, old *Searcher) error {
+func (e *Encoder) Encode(w io.Writer, packChecksum plumbing.Hash, commits []SelectedCommit) error {
 	e.hasher.Reset()
 	hw := io.MultiWriter(w, e.hasher)
 
-	n := e.source.ObjectCount()
-	bmLen := ((n + 63) / 64) * 8
+	reverse := map[plumbing.Hash]uint32{}
+	for i, commit := range e.entries {
+		reverse[commit.Hash] = uint32(i)
+	}
 
 	// --- Build type bitmaps ---
-	typeBitmaps := [4]Bitmap{
-		make(Bitmap, bmLen),
-		make(Bitmap, bmLen),
-		make(Bitmap, bmLen),
-		make(Bitmap, bmLen),
-	}
-	for pos := uint32(0); pos < uint32(n); pos++ {
-		switch e.source.ObjectType(pos) {
-		case plumbing.CommitObject:
-			typeBitmaps[0].Set(pos)
-		case plumbing.TreeObject:
-			typeBitmaps[1].Set(pos)
-		case plumbing.BlobObject:
-			typeBitmaps[2].Set(pos)
-		case plumbing.TagObject:
-			typeBitmaps[3].Set(pos)
-		}
+	typeEwahs, err := e.typeBitmaps()
+	if err != nil {
+		return fmt.Errorf("type ewah: %w", err)
 	}
 
 	// --- Topological sort ---
@@ -64,7 +88,7 @@ func (e *Encoder) Encode(w io.Writer, packChecksum []byte, commits []SelectedCom
 	// Ensure children come before parents so that when computing a
 	// commit's reachability bitmap we can OR in already-computed
 	// parent bitmaps instead of re-walking the full history.
-	sorted, err := TopoSort(e.source, commits)
+	sorted, err := TopoSort(e.s, commits)
 	if err != nil {
 		return fmt.Errorf("topological sort: %w", err)
 	}
@@ -82,7 +106,7 @@ func (e *Encoder) Encode(w io.Writer, packChecksum []byte, commits []SelectedCom
 	slices.Reverse(sorted)
 
 	for _, sc := range sorted {
-		bm, err := e.commitReachability(sc.Hash, bmLen, computed, old)
+		bm, err := e.commitReachability(sc.Hash, reverse, computed)
 		if err != nil {
 			return fmt.Errorf("computing reachability for %s: %w", sc.Hash, err)
 		}
@@ -127,13 +151,12 @@ func (e *Encoder) Encode(w io.Writer, packChecksum []byte, commits []SelectedCom
 	if _, err := hw.Write(hdr[:]); err != nil {
 		return err
 	}
-	if _, err := hw.Write(packChecksum); err != nil {
+	if _, err := hw.Write(packChecksum.Bytes()); err != nil {
 		return err
 	}
 
 	// --- Write type bitmaps ---
-	for _, tb := range typeBitmaps {
-		ewah := EncodeEWAH(tb)
+	for _, ewah := range typeEwahs {
 		if _, err := hw.Write(ewah); err != nil {
 			return err
 		}
@@ -165,33 +188,34 @@ func (e *Encoder) Encode(w io.Writer, packChecksum []byte, commits []SelectedCom
 // checked first.
 func (e *Encoder) commitReachability(
 	commit plumbing.Hash,
-	bmLen int,
+	reverse map[plumbing.Hash]uint32,
 	computed map[plumbing.Hash]Bitmap,
-	old *Searcher,
+	// old *Searcher,
 ) (Bitmap, error) {
 	// Try reusing from old bitmap.
-	if old != nil {
-		idxPos, _, ok := e.source.FindPosition(commit)
-		if ok {
-			oldBm, err := old.Reachable(idxPos)
-			if err == nil {
-				bm := make(Bitmap, bmLen)
-				copy(bm, oldBm)
-				return bm, nil
-			}
-		}
-	}
+	// TODO: calculate bitmap transform from old bitmap to new bitmap
+	//if old != nil {
+	//	idxPos, _, ok := e.source.FindPosition(commit)
+	//	if ok {
+	//		oldBm, err := old.Reachable(idxPos)
+	//		if err == nil {
+	//			bm := make(Bitmap, bmLen)
+	//			copy(bm, oldBm)
+	//			return bm, nil
+	//		}
+	//	}
+	//}
 
-	_, packPos, ok := e.source.FindPosition(commit)
+	packPos, ok := reverse[commit]
 	if !ok {
 		return nil, fmt.Errorf("commit %s not found in pack", commit)
 	}
 
-	bm := make(Bitmap, bmLen)
+	bm := NewBitmap(len(e.entries))
 	bm.Set(packPos)
 
 	// Walk the commit's tree.
-	obj, err := e.source.Object(packPos)
+	obj, err := e.s.EncodedObject(plumbing.CommitObject, commit)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +223,7 @@ func (e *Encoder) commitReachability(
 	if err != nil {
 		return nil, err
 	}
-	if err := e.walkTree(tree, bm); err != nil {
+	if err := e.walkTree(tree, reverse, bm); err != nil {
 		return nil, err
 	}
 
@@ -209,7 +233,7 @@ func (e *Encoder) commitReachability(
 			bm.Or(pbm)
 		} else {
 			// Parent not in the selected set — walk its full graph.
-			pbm, err := e.reachability(p, bmLen, old)
+			pbm, err := e.reachability(p, reverse)
 			if err != nil {
 				return nil, err
 			}
@@ -221,13 +245,13 @@ func (e *Encoder) commitReachability(
 }
 
 // walkTree sets bits for the tree at h and all its descendants.
-func (e *Encoder) walkTree(h plumbing.Hash, bm Bitmap) error {
+func (e *Encoder) walkTree(h plumbing.Hash, reverse map[plumbing.Hash]uint32, bm Bitmap) error {
 	stack := []plumbing.Hash{h}
 	for len(stack) > 0 {
 		cur := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 
-		_, packPos, ok := e.source.FindPosition(cur)
+		packPos, ok := reverse[cur]
 		if !ok {
 			continue
 		}
@@ -236,7 +260,7 @@ func (e *Encoder) walkTree(h plumbing.Hash, bm Bitmap) error {
 		}
 		bm.Set(packPos)
 
-		obj, err := e.source.Object(packPos)
+		obj, err := e.s.EncodedObject(plumbing.AnyObject, cur)
 		if err != nil {
 			return err
 		}
@@ -263,7 +287,7 @@ var ErrMissingObject = errors.New("pack missing reachable object")
 //
 // Only parent relationships between commits in the input set are
 // considered. Parents outside the set are ignored.
-func TopoSort(source PackSource, commits []SelectedCommit) ([]SelectedCommit, error) {
+func TopoSort(s storer.EncodedObjectStorer, commits []SelectedCommit) ([]SelectedCommit, error) {
 	// Build the set of selected commits and an adjacency list of
 	// parent edges within the set.
 	idx := make(map[plumbing.Hash]int, len(commits))
@@ -277,11 +301,7 @@ func TopoSort(source PackSource, commits []SelectedCommit) ([]SelectedCommit, er
 	inDegree := make([]int, len(commits))
 
 	for i, sc := range commits {
-		_, packPos, ok := source.FindPosition(sc.Hash)
-		if !ok {
-			continue
-		}
-		obj, err := source.Object(packPos)
+		obj, err := s.EncodedObject(plumbing.CommitObject, sc.Hash)
 		if err != nil {
 			return nil, fmt.Errorf("reading commit %s: %w", sc.Hash, err)
 		}
@@ -344,7 +364,7 @@ type SelectedCommit struct {
 // when it is at least maxDistance commits from the previous selection
 // along its first-parent chain, or when it is the tip itself.
 // A maxDistance of 0 selects every commit.
-func SelectCommits(source PackSource, tips []plumbing.Hash, maxDistance int) ([]SelectedCommit, error) {
+func (e *Encoder) SelectCommits(tips []plumbing.Hash, reverse map[plumbing.Hash]uint32, maxDistance int) ([]SelectedCommit, error) {
 	type commitInfo struct {
 		hash   plumbing.Hash
 		idxPos uint32
@@ -362,25 +382,18 @@ func SelectCommits(source PackSource, tips []plumbing.Hash, maxDistance int) ([]
 		}
 	}
 
-	hashSize := 20 // default SHA-1
-	if source.ObjectCount() > 0 {
-		// Detect hash size from the first object.
-		obj, err := source.Object(0)
-		if err == nil {
-			hashSize = obj.Hash().Size()
-		}
-	}
+	hashSize := e.hasher.Size()
 
 	for len(queue) > 0 {
 		h := queue[0]
 		queue = queue[1:]
 
-		idxPos, packPos, ok := source.FindPosition(h)
+		idxPos, ok := reverse[h]
 		if !ok {
 			return nil, fmt.Errorf("%w: commit %s", ErrMissingObject, h)
 		}
 
-		obj, err := source.Object(packPos)
+		obj, err := e.s.EncodedObject(plumbing.AnyObject, h)
 		if err != nil {
 			return nil, fmt.Errorf("reading commit %s: %w", h, err)
 		}
@@ -396,7 +409,7 @@ func SelectCommits(source PackSource, tips []plumbing.Hash, maxDistance int) ([]
 		}
 
 		// Verify the tree (and its children) are in the pack.
-		if err := verifyReachable(source, tree, visited, hashSize); err != nil {
+		if err := verifyReachable(e.s, reverse, tree, visited, hashSize); err != nil {
 			return nil, err
 		}
 
@@ -442,7 +455,7 @@ func SelectCommits(source PackSource, tips []plumbing.Hash, maxDistance int) ([]
 
 // verifyReachable checks that the tree at h and all its descendants
 // are in the pack. It adds verified hashes to visited.
-func verifyReachable(source PackSource, h plumbing.Hash, visited map[plumbing.Hash]struct{}, hashSize int) error {
+func verifyReachable(s storer.EncodedObjectStorer, reverse map[plumbing.Hash]uint32, h plumbing.Hash, visited map[plumbing.Hash]struct{}, hashSize int) error {
 	stack := []plumbing.Hash{h}
 	for len(stack) > 0 {
 		cur := stack[len(stack)-1]
@@ -453,12 +466,7 @@ func verifyReachable(source PackSource, h plumbing.Hash, visited map[plumbing.Ha
 		}
 		visited[cur] = struct{}{}
 
-		_, packPos, ok := source.FindPosition(cur)
-		if !ok {
-			return fmt.Errorf("%w: %s", ErrMissingObject, cur)
-		}
-
-		obj, err := source.Object(packPos)
+		obj, err := s.EncodedObject(plumbing.AnyObject, cur)
 		if err != nil {
 			return fmt.Errorf("reading object %s: %w", cur, err)
 		}
@@ -476,66 +484,69 @@ func verifyReachable(source PackSource, h plumbing.Hash, visited map[plumbing.Ha
 
 // reachability computes the full reachability bitmap for a commit.
 // If old is provided, it tries to reuse the precomputed bitmap.
-func (e *Encoder) reachability(commit plumbing.Hash, bmLen int, old *Searcher) (Bitmap, error) {
+func (e *Encoder) reachability(commit plumbing.Hash, reverse map[plumbing.Hash]uint32) (Bitmap, error) {
 	// Try reusing from old bitmap.
-	if old != nil {
-		idxPos, _, ok := e.source.FindPosition(commit)
-		if ok {
-			oldBm, err := old.Reachable(idxPos)
-			if err == nil {
-				bm := make(Bitmap, bmLen)
-				copy(bm, oldBm)
-				return bm, nil
-			}
-		}
-	}
+	// TODO: calculate bitmap transform from old bitmap to new bitmap
+	//if old != nil {
+	//	idxPos, _, ok := e.source.FindPosition(commit)
+	//	if ok {
+	//		oldBm, err := old.Reachable(idxPos)
+	//		if err == nil {
+	//			bm := make(Bitmap, bmLen)
+	//			copy(bm, oldBm)
+	//			return bm, nil
+	//		}
+	//	}
+	//}
 
 	// Walk the graph from scratch.
-	bm := make(Bitmap, bmLen)
-	queue := make([]objPos, 0, 64)
+	bm := NewBitmap(len(e.entries))
+	queue := make([]uint32, 0, 64)
 
-	idxPos, packPos, ok := e.source.FindPosition(commit)
+	packPos, ok := reverse[commit]
 	if !ok {
 		return nil, fmt.Errorf("commit not found in pack")
 	}
-	queue = append(queue, objPos{idxPos, packPos})
+	queue = append(queue, packPos)
 
 	for len(queue) > 0 {
-		cur := queue[0]
+		curPackPos := queue[0]
 		queue = queue[1:]
 
-		if bm.Get(cur.packPos) {
+		if bm.Get(curPackPos) {
 			continue
 		}
-		bm.Set(cur.packPos)
+		bm.Set(curPackPos)
 
-		obj, err := e.source.Object(cur.packPos)
+		entry := e.entries[curPackPos]
+		o, err := e.s.EncodedObject(plumbing.AnyObject, entry.Hash)
 		if err != nil {
 			return nil, err
 		}
 
-		switch obj.Type() {
+		switch o.Type() {
+		// TODO use type bitmaps here?
 		case plumbing.CommitObject:
-			tree, parents, err := parseCommitObj(obj)
+			tree, parents, err := parseCommitObj(o)
 			if err != nil {
 				return nil, err
 			}
-			queue = resolveHashes(e.source, queue, tree)
-			queue = resolveHashes(e.source, queue, parents...)
+			queue = resolveHashes(reverse, queue, tree)
+			queue = resolveHashes(reverse, queue, parents...)
 
 		case plumbing.TreeObject:
-			entries, err := parseTreeObj(obj, e.hasher.Size())
+			entries, err := parseTreeObj(o, e.hasher.Size())
 			if err != nil {
 				return nil, err
 			}
-			queue = resolveHashes(e.source, queue, entries...)
+			queue = resolveHashes(reverse, queue, entries...)
 
 		case plumbing.TagObject:
-			target, err := parseTagObj(obj)
+			target, err := parseTagObj(o)
 			if err != nil {
 				return nil, err
 			}
-			queue = resolveHashes(e.source, queue, target)
+			queue = resolveHashes(reverse, queue, target)
 		}
 	}
 
@@ -543,11 +554,11 @@ func (e *Encoder) reachability(commit plumbing.Hash, bmLen int, old *Searcher) (
 }
 
 // resolveHashes maps hashes to positions and appends them to the queue.
-func resolveHashes(src PackSource, queue []objPos, hashes ...plumbing.Hash) []objPos {
+func resolveHashes(reverse map[plumbing.Hash]uint32, queue []uint32, hashes ...plumbing.Hash) []uint32 {
 	for _, h := range hashes {
-		idxPos, packPos, ok := src.FindPosition(h)
+		packPos, ok := reverse[h]
 		if ok {
-			queue = append(queue, objPos{idxPos, packPos})
+			queue = append(queue, packPos)
 		}
 	}
 	return queue

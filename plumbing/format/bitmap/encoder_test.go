@@ -39,9 +39,9 @@ func TestEncodeRoundTrip(t *testing.T) {
 
 	packChecksum := bitmapIdx.PackChecksum()
 
-	enc := NewEncoder(src, hash.New(crypto.SHA1))
+	enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
 	var buf bytes.Buffer
-	err := enc.Encode(&buf, packChecksum, commits, nil)
+	err := enc.Encode(&buf, packChecksum, commits)
 	require.NoError(t, err)
 
 	// Parse the output back.
@@ -69,9 +69,9 @@ func TestEncodeMatchesFixture(t *testing.T) {
 
 	commits := fixtureCommits(bitmapIdx, src)
 
-	enc := NewEncoder(src, hash.New(crypto.SHA1))
+	enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
 	var buf bytes.Buffer
-	err := enc.Encode(&buf, bitmapIdx.PackChecksum(), commits, nil)
+	err := enc.Encode(&buf, bitmapIdx.PackChecksum(), commits)
 	require.NoError(t, err)
 
 	result, err := Open(buf.Bytes(), hash.New(crypto.SHA1))
@@ -103,9 +103,9 @@ func TestEncodeSHA256(t *testing.T) {
 
 	commits := fixtureCommits(bitmapIdx, src)
 
-	enc := NewEncoder(src, hash.New(crypto.SHA256))
+	enc := NewEncoder(src, hash.New(crypto.SHA256), src.Entries())
 	var buf bytes.Buffer
-	err := enc.Encode(&buf, bitmapIdx.PackChecksum(), commits, nil)
+	err := enc.Encode(&buf, bitmapIdx.PackChecksum(), commits)
 	require.NoError(t, err)
 
 	result, err := Open(buf.Bytes(), hash.New(crypto.SHA256))
@@ -135,7 +135,14 @@ func TestSelectCommits(t *testing.T) {
 	// Use the fixture's HEAD as the tip.
 	head := src.hashAtIdx(bitmapIdx.entries.commitPosition(0))
 
-	commits, err := SelectCommits(src, []plumbing.Hash{head}, 0)
+	enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
+	// SelectCommits expects hash → idx (hash-sorted) position so the
+	// resulting SelectedCommit.IdxPos can be written into the entry header.
+	reverse := map[plumbing.Hash]uint32{}
+	for i, h := range src.idxToHash {
+		reverse[h] = uint32(i)
+	}
+	commits, err := enc.SelectCommits([]plumbing.Hash{head}, reverse, 0)
 	require.NoError(t, err)
 
 	// With maxDistance=0, every reachable commit should be selected.
@@ -160,11 +167,18 @@ func TestSelectCommitsDistance(t *testing.T) {
 	src := openPackSource(t)
 
 	head := src.hashAtIdx(bitmapIdx.entries.commitPosition(0))
+	enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
+	// SelectCommits expects hash → idx (hash-sorted) position so the
+	// resulting SelectedCommit.IdxPos can be written into the entry header.
+	reverse := map[plumbing.Hash]uint32{}
+	for i, h := range src.idxToHash {
+		reverse[h] = uint32(i)
+	}
 
-	all, err := SelectCommits(src, []plumbing.Hash{head}, 0)
+	all, err := enc.SelectCommits([]plumbing.Hash{head}, reverse, 0)
 	require.NoError(t, err)
 
-	sparse, err := SelectCommits(src, []plumbing.Hash{head}, 100)
+	sparse, err := enc.SelectCommits([]plumbing.Hash{head}, reverse, 100)
 	require.NoError(t, err)
 
 	// Sparse selection should have fewer commits.
@@ -182,7 +196,15 @@ func TestTopoSort(t *testing.T) {
 	src := openPackSource(t)
 
 	head := src.hashAtIdx(bitmapIdx.entries.commitPosition(0))
-	commits, err := SelectCommits(src, []plumbing.Hash{head}, 0)
+	enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
+	// SelectCommits expects hash → idx (hash-sorted) position so the
+	// resulting SelectedCommit.IdxPos can be written into the entry header.
+	reverse := map[plumbing.Hash]uint32{}
+	for i, h := range src.idxToHash {
+		reverse[h] = uint32(i)
+	}
+
+	commits, err := enc.SelectCommits([]plumbing.Hash{head}, reverse, 0)
 	require.NoError(t, err)
 
 	sorted, err := TopoSort(src, commits)
@@ -220,10 +242,17 @@ func TestSelectCommitsMissingObject(t *testing.T) {
 	t.Parallel()
 
 	src := openPackSource(t)
+	enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
+	// SelectCommits expects hash → idx (hash-sorted) position so the
+	// resulting SelectedCommit.IdxPos can be written into the entry header.
+	reverse := map[plumbing.Hash]uint32{}
+	for i, h := range src.idxToHash {
+		reverse[h] = uint32(i)
+	}
 
 	// Use a hash that's not in the pack.
 	bogus, _ := plumbing.FromHex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	_, err := SelectCommits(src, []plumbing.Hash{bogus}, 0)
+	_, err := enc.SelectCommits([]plumbing.Hash{bogus}, reverse, 0)
 	assert.ErrorIs(t, err, ErrMissingObject)
 }
 
@@ -268,35 +297,43 @@ func findTips(t testing.TB, src *testPackSource) []plumbing.Hash {
 
 func BenchmarkSelectCommits(b *testing.B) {
 	src := openPackSource(b)
+	enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
+	// SelectCommits expects hash → idx (hash-sorted) position so the
+	// resulting SelectedCommit.IdxPos can be written into the entry header.
+	reverse := map[plumbing.Hash]uint32{}
+	for i, h := range src.idxToHash {
+		reverse[h] = uint32(i)
+	}
 	tips := findTips(b, src)
 	b.Logf("tips=%d objects=%d", len(tips), src.ObjectCount())
 
 	b.ResetTimer()
 	for b.Loop() {
-		_, err := SelectCommits(src, tips, 100)
+		_, err := enc.SelectCommits(tips, reverse, 100)
 		if err != nil {
 			b.Fatal(err)
 		}
 	}
 }
 
-func BenchmarkEncodeReuse(b *testing.B) {
-	bitmapIdx := openFixture(b)
-	src := openPackSource(b)
-	old := NewSearcher(bitmapIdx)
-
-	commits := fixtureCommits(bitmapIdx, src)
-	packChecksum := bitmapIdx.PackChecksum()
-
-	b.ResetTimer()
-	for b.Loop() {
-		enc := NewEncoder(src, hash.New(crypto.SHA1))
-		err := enc.Encode(io.Discard, packChecksum, commits, old)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
+// TODO re-enable when we have reuse implemented again
+//func BenchmarkEncodeReuse(b *testing.B) {
+//	bitmapIdx := openFixture(b)
+//	src := openPackSource(b)
+//	old := NewSearcher(bitmapIdx)
+//
+//	commits := fixtureCommits(bitmapIdx, src)
+//	packChecksum := bitmapIdx.PackChecksum()
+//
+//	b.ResetTimer()
+//	for b.Loop() {
+//		enc := NewEncoder(src, hash.New(crypto.SHA1))
+//		err := enc.Encode(io.Discard, packChecksum, commits, old)
+//		if err != nil {
+//			b.Fatal(err)
+//		}
+//	}
+//}
 
 func BenchmarkEncode(b *testing.B) {
 	bitmapIdx := openFixture(b)
@@ -307,8 +344,8 @@ func BenchmarkEncode(b *testing.B) {
 
 	b.ResetTimer()
 	for b.Loop() {
-		enc := NewEncoder(src, hash.New(crypto.SHA1))
-		err := enc.Encode(io.Discard, packChecksum, commits, nil)
+		enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
+		err := enc.Encode(io.Discard, packChecksum, commits)
 		if err != nil {
 			b.Fatal(err)
 		}

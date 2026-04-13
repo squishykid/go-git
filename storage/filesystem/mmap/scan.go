@@ -48,6 +48,17 @@ type PackScanner struct {
 	revCleanup  func() error
 }
 
+/*
+TODO interfaces for different combinations of packfiles
+
+I.e.
+
+- PackedObjectScanner -> only packfile
+- PackedIdxScanner -> packfile and idx
+- PackedIdxRevScanner -> packfile, idx and rev
+- PackedMapScanner -> packfile, idx, rev and bitmap
+*/
+
 // NewPackScanner creates a PackScanner from the given pack, idx, and rev files.
 func NewPackScanner(hashSize int, pack, idx, rev billy.File) (*PackScanner, error) {
 	s := &PackScanner{

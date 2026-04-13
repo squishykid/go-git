@@ -1,7 +1,6 @@
 package bitmap
 
 import (
-	"bytes"
 	"crypto"
 	"encoding/binary"
 	"fmt"
@@ -32,6 +31,58 @@ type testPackSource struct {
 	// idxToHash maps idx position → hash.
 	idxToHash []plumbing.Hash
 	pf        *packfile.Packfile
+}
+
+type testPackfileEntry struct {
+	Hash plumbing.Hash
+}
+
+func (e testPackfileEntry) GetHash() plumbing.Hash {
+	return e.Hash
+}
+
+var _ storer.EncodedObjectStorer = (*testPackSource)(nil)
+
+// Entries returns one entry per object in pack-offset order, matching
+// the position space used by bitmap bits.
+func (s *testPackSource) Entries() []PackfileEntry {
+	entries := make([]PackfileEntry, len(s.offsetToIdx))
+	for packPos, idxPos := range s.offsetToIdx {
+		entries[packPos] = testPackfileEntry{Hash: s.idxToHash[idxPos]}
+	}
+	return entries
+}
+
+func (s *testPackSource) RawObjectWriter(typ plumbing.ObjectType, sz int64) (w io.WriteCloser, err error) {
+	panic("implement me")
+}
+
+func (s *testPackSource) NewEncodedObject() plumbing.EncodedObject {
+	panic("implement me")
+}
+
+func (s *testPackSource) SetEncodedObject(object plumbing.EncodedObject) (plumbing.Hash, error) {
+	panic("implement me")
+}
+
+func (s *testPackSource) EncodedObject(objectType plumbing.ObjectType, p plumbing.Hash) (plumbing.EncodedObject, error) {
+	return s.pf.Get(p)
+}
+
+func (s *testPackSource) IterEncodedObjects(objectType plumbing.ObjectType) (storer.EncodedObjectIter, error) {
+	panic("implement me")
+}
+
+func (s *testPackSource) HasEncodedObject(p plumbing.Hash) error {
+	panic("implement me")
+}
+
+func (s *testPackSource) EncodedObjectSize(p plumbing.Hash) (int64, error) {
+	panic("implement me")
+}
+
+func (s *testPackSource) AddAlternate(remote string) error {
+	panic("implement me")
 }
 
 func (s *testPackSource) ObjectCount() int {
@@ -185,16 +236,6 @@ func TestPackerNegotiateWalk(t *testing.T) {
 
 	// The commit itself must be in the result.
 	assert.True(t, bm.Get(commitPos), "walked commit should be in result")
-
-	// The result should produce a valid packfile with many objects.
-	var buf bytes.Buffer
-	checksum, err := p.WritePack(&buf, bm)
-	require.NoError(t, err)
-
-	data := buf.Bytes()
-	assert.Equal(t, []byte("PACK"), data[0:4])
-	assert.Greater(t, binary.BigEndian.Uint32(data[8:12]), uint32(1))
-	assert.False(t, checksum.IsZero())
 }
 
 func TestPackerNegotiate(t *testing.T) {
@@ -276,63 +317,6 @@ func TestPackerNegotiateWithHaves(t *testing.T) {
 		setBits++
 	}
 	assert.Equal(t, 0, setBits)
-}
-
-func TestPackerPack(t *testing.T) {
-	t.Parallel()
-
-	bitmapIdx := openFixture(t)
-	src := openPackSource(t)
-	s := NewSearcher(bitmapIdx)
-	p := NewPacker(s, src, hash.New(crypto.SHA1))
-
-	e0 := bitmapIdx.Entry(0)
-	h0 := src.hashAtIdx(e0.ObjectPosition)
-
-	var buf bytes.Buffer
-	checksum, err := p.Pack(&buf, []plumbing.Hash{h0}, nil)
-	require.NoError(t, err)
-
-	data := buf.Bytes()
-	require.GreaterOrEqual(t, len(data), 12)
-
-	// Valid pack header.
-	assert.Equal(t, []byte("PACK"), data[0:4])
-	assert.Equal(t, uint32(2), binary.BigEndian.Uint32(data[4:8]))
-
-	objectCount := binary.BigEndian.Uint32(data[8:12])
-	assert.Greater(t, objectCount, uint32(10))
-
-	// Trailing checksum matches the returned hash.
-	assert.False(t, checksum.IsZero())
-	assert.Equal(t, checksum.Bytes(), data[len(data)-checksum.Size():])
-}
-
-func TestPackerPackWithHaves(t *testing.T) {
-	t.Parallel()
-
-	bitmapIdx := openFixture(t)
-	src := openPackSource(t)
-	s := NewSearcher(bitmapIdx)
-	p := NewPacker(s, src, hash.New(crypto.SHA1))
-
-	e0 := bitmapIdx.Entry(0)
-	h0 := src.hashAtIdx(e0.ObjectPosition)
-	e1 := bitmapIdx.Entry(1)
-	h1 := src.hashAtIdx(e1.ObjectPosition)
-
-	var buf1 bytes.Buffer
-	_, err := p.Pack(&buf1, []plumbing.Hash{h0}, nil)
-	require.NoError(t, err)
-	countWithout := binary.BigEndian.Uint32(buf1.Bytes()[8:12])
-
-	var buf2 bytes.Buffer
-	_, err = p.Pack(&buf2, []plumbing.Hash{h0}, []plumbing.Hash{h1})
-	require.NoError(t, err)
-	countWith := binary.BigEndian.Uint32(buf2.Bytes()[8:12])
-
-	// Providing haves should reduce the object count.
-	assert.Less(t, countWith, countWithout)
 }
 
 func openReadOnlyStorer(t testing.TB) *readOnlyStorer {
