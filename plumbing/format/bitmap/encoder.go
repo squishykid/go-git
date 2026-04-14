@@ -190,7 +190,7 @@ func (e *Encoder) Encode(w io.Writer, packChecksum plumbing.Hash, commits []Sele
 func (e *Encoder) commitReachability(
 	commit plumbing.Hash,
 	computed map[plumbing.Hash]Bitmap,
-	// old *Searcher,
+// old *Searcher,
 ) (Bitmap, error) {
 	// Try reusing from old bitmap.
 	// TODO: calculate bitmap transform from old bitmap to new bitmap
@@ -241,6 +241,7 @@ func (e *Encoder) commitReachability(
 			if err != nil {
 				return nil, err
 			}
+			computed[p] = pbm
 			bm.Or(pbm)
 		}
 	}
