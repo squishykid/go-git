@@ -67,7 +67,7 @@ func (s *testPackSource) AddAlternate(remote string) error {
 	panic("implement me")
 }
 
-func (s *testPackSource) ObjectCount() int {
+func (s *testPackSource) Count() int {
 	return len(s.offsetToIdx)
 }
 
@@ -337,7 +337,7 @@ func TestNegotiateMatchesRevlistObjects(t *testing.T) {
 	bm, err := p.Negotiate([]plumbing.Hash{want}, nil)
 	require.NoError(t, err)
 
-	maxPos := uint32(src.ObjectCount())
+	maxPos := uint32(src.Count())
 	bitmapSet := make(map[string]struct{})
 	it := bm.SetBits()
 	for pos, ok := it.Next(); ok; pos, ok = it.Next() {
@@ -378,7 +378,7 @@ func TestNegotiateWalkMatchesRevlistObjects(t *testing.T) {
 	bm, err := p.Negotiate(wants, haves)
 	require.NoError(t, err)
 
-	maxPos := uint32(src.ObjectCount())
+	maxPos := uint32(src.Count())
 	bitmapSet := make(map[string]struct{})
 	it := bm.SetBits()
 	for pos, ok := it.Next(); ok; pos, ok = it.Next() {

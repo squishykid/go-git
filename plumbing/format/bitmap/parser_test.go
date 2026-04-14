@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	fixtures "github.com/go-git/go-git-fixtures/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/idxfile"
 	"github.com/go-git/go-git/v6/plumbing/format/revfile"
 	"github.com/go-git/go-git/v6/plumbing/hash"
@@ -15,106 +14,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type ordinal struct {
-	*idxfile.MemoryIndex
-	rev          []uint32 // packPos → idxPos
-	idxToPackPos []uint32 // idxPos → packPos (inverse of rev)
-	hashSize     int
-}
-
-func newOrdinal(index *idxfile.MemoryIndex, rev []uint32, hashSize int) *ordinal {
-	idxToPackPos := make([]uint32, len(rev))
-	for packPos, idxPos := range rev {
-		idxToPackPos[idxPos] = uint32(packPos)
-	}
-	return &ordinal{MemoryIndex: index, rev: rev, idxToPackPos: idxToPackPos, hashSize: hashSize}
-}
-
-func (o *ordinal) FindPackRank(h plumbing.Hash) (uint32, bool) {
-	// Use MemoryIndex to find the idx-sorted position, then map to pack rank.
-	// findHashIndex is unexported, so use the Fanout table directly.
-	bucket := int(h.Bytes()[0])
-	k := o.FanoutMapping[bucket]
-	if k < 0 {
-		return 0, false
-	}
-
-	var base uint32
-	if bucket > 0 {
-		base = o.Fanout[bucket-1]
-	}
-	count := o.Fanout[bucket] - base
-
-	// Binary search within the bucket's Names slice.
-	lo, hi := uint32(0), count
-	for lo < hi {
-		mid := (lo + hi) / 2
-		start := int(mid) * o.hashSize
-		cmp := h.Compare(o.Names[k][start : start+o.hashSize])
-		if cmp == 0 {
-			idxPos := base + mid
-			return o.idxToPackPos[idxPos], true
-		} else if cmp > 0 {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-	return 0, false
-}
-
-func (o *ordinal) HashAtIdxRank(idxPos uint32) (plumbing.Hash, bool) {
-	// Binary search the 256-entry Fanout table to find the bucket
-	// containing idxPos. Fanout[b] = cumulative count of objects
-	// with first hash byte <= b.
-	lo, hi := 0, 256
-	for lo < hi {
-		mid := (lo + hi) / 2
-		if o.Fanout[mid] <= idxPos {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-	if lo >= 256 {
-		return plumbing.ZeroHash, false
-	}
-
-	k := o.FanoutMapping[lo]
-	if k < 0 {
-		return plumbing.ZeroHash, false
-	}
-
-	var base uint32
-	if lo > 0 {
-		base = o.Fanout[lo-1]
-	}
-	localPos := int(idxPos - base)
-
-	start := localPos * o.hashSize
-	end := start + o.hashSize
-	if end > len(o.Names[k]) {
-		return plumbing.ZeroHash, false
-	}
-	h, _ := plumbing.FromBytes(o.Names[k][start:end])
-	return h, true
-}
-
-func (o *ordinal) HashAtPackRank(packPos uint32) (plumbing.Hash, bool) {
-	if int(packPos) >= len(o.rev) {
-		return plumbing.ZeroHash, false
-	}
-	return o.HashAtIdxRank(o.rev[packPos])
-}
-
-var _ idxfile.OrdinalIndex = (*ordinal)(nil)
-
-func openFixture(t testing.TB) (*Index, idxfile.OrdinalIndex) {
+func openFixture(t testing.TB) (*Index, revfile.RevIndex) {
 	t.Helper()
 	return openFixtureByURL(t, "https://github.com/go-git/go-git.git", crypto.SHA1)
 }
 
-func getOrdinalIndexFromIdxFile(rIdx io.ReadCloser, rRev io.ReadCloser, h crypto.Hash) idxfile.OrdinalIndex {
+func getOrdinalIndexFromIdxFile(rIdx io.ReadCloser, rRev io.ReadCloser, h crypto.Hash) revfile.RevIndex {
 	defer rIdx.Close()
 	defer rRev.Close()
 
@@ -143,10 +48,10 @@ func getOrdinalIndexFromIdxFile(rIdx io.ReadCloser, rRev io.ReadCloser, h crypto
 		panic(err)
 	}
 
-	return newOrdinal(idx, got, h.Size())
+	return revfile.NewMemoryRevIndex(idx, got, h.Size())
 }
 
-func openFixtureByURL(t testing.TB, url string, h crypto.Hash) (*Index, idxfile.OrdinalIndex) {
+func openFixtureByURL(t testing.TB, url string, h crypto.Hash) (*Index, revfile.RevIndex) {
 	t.Helper()
 	q := fixtures.ByTag("bitmap").ByURL(url).One()
 

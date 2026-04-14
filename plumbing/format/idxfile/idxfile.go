@@ -38,33 +38,9 @@ type Index interface {
 	// EntriesByOffset returns an iterator to retrieve all index entries ordered
 	// by offset.
 	EntriesByOffset() (EntryIter, error)
-}
-
-// OrdinalIndex extends [Index] with O(log n) bidirectional lookup
-// between an object's hash and its two ordinal positions in the pack:
-//
-//   - idxPos: the 0-based rank in hash-sorted (.idx) order. This is
-//     what pack bitmap entry headers reference.
-//   - packPos: the 0-based rank in pack-offset order (objects sorted by
-//     their byte offset in the .pack file). This is the position space
-//     used by pack bitmap bits. Physical order in the packfile.
-//
-// Both positions are derivable from [Index] alone (idxPos via
-// [Index.Entries], packPos via [Index.EntriesByOffset]) but the
-// iterator-based approach is O(n). PositionedIndex implementations
-// expose these lookups directly so callers building bitmap indices, or
-// otherwise needing random access, can avoid the upfront walk.
-type OrdinalIndex interface {
-	Index
 	// FindPackRank returns the pack-offset position of the object
 	// with the given hash, or [false].
 	FindPackRank(h plumbing.Hash) (uint32, bool)
-	// HashAtIdxRank returns the hash of the object at the given
-	// hash-sorted position.
-	HashAtIdxRank(idxPos uint32) (plumbing.Hash, bool)
-	// HashAtPackRank returns the hash of the object at the given
-	// pack-offset position.
-	HashAtPackRank(packPos uint32) (plumbing.Hash, bool)
 }
 
 // MemoryIndex is the in memory representation of an idx file.

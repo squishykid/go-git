@@ -238,7 +238,7 @@ func TestSelectCommitsMissingObject(t *testing.T) {
 // a parent by any other commit (i.e. branch/tag tips).
 func findTips(t testing.TB, src *testPackSource) []plumbing.Hash {
 	t.Helper()
-	n := src.ObjectCount()
+	n := src.Count()
 	hasParent := make(map[plumbing.Hash]struct{})
 
 	// First pass: collect all parent references.
@@ -278,7 +278,7 @@ func BenchmarkSelectCommits(b *testing.B) {
 	src := openPackSource(b)
 	enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
 	tips := findTips(b, src)
-	b.Logf("tips=%d objects=%d", len(tips), src.ObjectCount())
+	b.Logf("tips=%d objects=%d", len(tips), src.Count())
 
 	b.ResetTimer()
 	for b.Loop() {

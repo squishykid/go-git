@@ -59,6 +59,11 @@ type LazyIndex struct {
 	fanout [256]uint32 // cached from idx; small enough to keep in memory
 }
 
+func (s *LazyIndex) FindPackRank(h plumbing.Hash) (uint32, bool) {
+	//TODO implement me
+	panic("implement me")
+}
+
 var _ Index = (*LazyIndex)(nil)
 
 // NewLazyIndex creates a LazyIndex from opener functions for .idx and

@@ -7,26 +7,31 @@ import (
 	"io"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/format/revfile"
 	"github.com/go-git/go-git/v6/plumbing/hash"
 )
 
-// PackSource provides access to objects in the source packfile.
-//
-// Bitmap entries reference two position spaces:
-//   - idx position: hash-sorted order (Entry.ObjectPosition, used by Searcher)
-//   - pack-offset position: order objects appear in the .pack file
-//     (used by type and reachability bitmaps)
-type PackSource interface {
-	// ObjectCount returns the total number of objects in the pack.
-	ObjectCount() int
-	// FindPosition returns both the idx position and pack-offset position
-	// for the given hash, or false if the hash is not in the pack.
-	FindPosition(h plumbing.Hash) (idxPos, packPos uint32, ok bool)
-	// Object returns the encoded object at the given pack-offset position.
+//// PackSource provides access to objects in the source packfile.
+////
+//// Bitmap entries reference two position spaces:
+////   - idx position: hash-sorted order (Entry.ObjectPosition, used by Searcher)
+////   - pack-offset position: order objects appear in the .pack file
+////     (used by type and reachability bitmaps)
+//type PackSource interface {
+//	// Count returns the total number of objects in the pack.
+//	Count() (int64, error)
+//	// FindPackRank returns both the idx position and pack-offset position
+//	// for the given hash, or false if the hash is not in the pack.
+//	FindPackRank(h plumbing.Hash) (packPos uint32, ok bool)
+//	// IdxPosAtPackRank returns the index position for the object
+//	// at the given pack rank.
+//	IdxPosAtPackRank(packRank uint32) (uint32, bool)
+//}
+
+type Packfile interface {
+	// GetByOffset returns the encoded object at the given pack-offset position.
 	// The returned object must have resolved (non-delta) content.
-	Object(packPos uint32) (plumbing.EncodedObject, error)
-	// ObjectType returns the object type at the given pack-offset position.
-	ObjectType(packPos uint32) plumbing.ObjectType
+	GetByOffset(offset int64) (plumbing.EncodedObject, error)
 }
 
 // Packer uses bitmap reachability data to efficiently build a packfile
@@ -34,16 +39,19 @@ type PackSource interface {
 // to "wants".
 type Packer struct {
 	searcher *Searcher
-	source   PackSource
+
+	source   revfile.RevIndex
+	packfile Packfile
 	hasher   hash.Hash
 }
 
 // NewPacker creates a Packer from a Searcher, a PackSource for reading
 // objects, and a hash function for computing the packfile checksum.
-func NewPacker(s *Searcher, source PackSource, h hash.Hash) *Packer {
+func NewPacker(s *Searcher, source revfile.RevIndex, packfile Packfile, h hash.Hash) *Packer {
 	return &Packer{
 		searcher: s,
 		source:   source,
+		packfile: packfile,
 		hasher:   h,
 	}
 }
@@ -80,7 +88,10 @@ func (p *Packer) Negotiate(wants, haves []plumbing.Hash) (Bitmap, error) {
 func (p *Packer) Reachability(hashes []plumbing.Hash) (bm Bitmap, missing []plumbing.Hash, err error) {
 	// Round up to 64-bit word boundary so the bitmap is at least as
 	// large as any EWAH-decompressed bitmap from the same pack.
-	n := p.source.ObjectCount()
+	n, err := p.source.Count()
+	if err != nil {
+		fmt.Errorf("getting count: %w", err)
+	}
 	bmLen := ((n + 63) / 64) * 8
 	bm = make(Bitmap, bmLen)
 
@@ -118,7 +129,7 @@ func (p *Packer) Reachability(hashes []plumbing.Hash) (bm Bitmap, missing []plum
 		// No precomputed bitmap — mark this object and enqueue children.
 		bm.Set(cur.packPos)
 
-		obj, err := p.source.Object(cur.packPos)
+		obj, err := p.packfile.GetByOffset(int64(cur.packPos))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -160,22 +171,25 @@ type objPos struct {
 // resolveQueue maps hashes to pack positions as they are enqueued,
 // collecting any hashes not found in the pack.
 type resolveQueue struct {
-	source  PackSource
+	source  revfile.RevIndex
 	queue   []objPos
 	missing []plumbing.Hash
 }
 
-func (q *resolveQueue) init(src PackSource) {
+func (q *resolveQueue) init(src revfile.RevIndex) {
 	q.source = src
 }
 
 func (q *resolveQueue) add(h plumbing.Hash) {
-	idxPos, packPos, ok := q.source.FindPosition(h)
+	packPos, ok := q.source.FindPackRank(h)
 	if ok {
-		q.queue = append(q.queue, objPos{idxPos, packPos})
-	} else {
-		q.missing = append(q.missing, h)
+		idxPos, ok := q.source.IdxPosAtPackRank(packPos)
+		if ok {
+			q.queue = append(q.queue, objPos{idxPos, packPos})
+			return
+		}
 	}
+	q.missing = append(q.missing, h)
 }
 
 func (q *resolveQueue) addAll(hashes []plumbing.Hash) {
