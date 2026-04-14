@@ -22,6 +22,7 @@ type Encoder struct {
 
 // NewEncoder creates an Encoder that reads objects from source and uses
 // h for the file checksum.
+// TODO make storer be just a packfile, then we don't need to implement the magic
 func NewEncoder(s storer.EncodedObjectStorer, h hash.Hash, index revfile.RevIndex) *Encoder {
 	return &Encoder{s: s, hasher: h, index: index}
 }
@@ -530,22 +531,22 @@ func (e *Encoder) reachability(commit plumbing.Hash) (Bitmap, error) {
 			if err != nil {
 				return nil, err
 			}
-			queue = e.resolveHashes(queue, tree)
-			queue = e.resolveHashes(queue, parents...)
+			queue = e.resolveHashes(queue, []plumbing.Hash{tree})
+			queue = e.resolveHashes(queue, parents)
 
 		case plumbing.TreeObject:
 			entries, err := parseTreeObj(o, e.hasher.Size())
 			if err != nil {
 				return nil, err
 			}
-			queue = e.resolveHashes(queue, entries...)
+			queue = e.resolveHashes(queue, entries)
 
 		case plumbing.TagObject:
 			target, err := parseTagObj(o)
 			if err != nil {
 				return nil, err
 			}
-			queue = e.resolveHashes(queue, target)
+			queue = e.resolveHashes(queue, []plumbing.Hash{target})
 		}
 	}
 
@@ -553,7 +554,7 @@ func (e *Encoder) reachability(commit plumbing.Hash) (Bitmap, error) {
 }
 
 // resolveHashes maps hashes to positions and appends them to the queue.
-func (e *Encoder) resolveHashes(queue []uint32, hashes ...plumbing.Hash) []uint32 {
+func (e *Encoder) resolveHashes(queue []uint32, hashes []plumbing.Hash) []uint32 {
 	for _, h := range hashes {
 		packPos, ok := e.index.FindHashRank(h)
 		if ok {
