@@ -181,7 +181,7 @@ func (q *resolveQueue) init(src revfile.RevIndex) {
 }
 
 func (q *resolveQueue) add(h plumbing.Hash) {
-	packPos, ok := q.source.FindPackRank(h)
+	packPos, ok := q.source.FindHashRank(h)
 	if ok {
 		idxPos, ok := q.source.IdxPosAtPackRank(packPos)
 		if ok {

@@ -8,7 +8,7 @@ import (
 	"slices"
 
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/format/idxfile"
+	"github.com/go-git/go-git/v6/plumbing/format/revfile"
 	"github.com/go-git/go-git/v6/plumbing/hash"
 	"github.com/go-git/go-git/v6/plumbing/storer"
 )
@@ -17,12 +17,12 @@ import (
 type Encoder struct {
 	s      storer.EncodedObjectStorer
 	hasher hash.Hash
-	index  idxfile.OrdinalIndex
+	index  revfile.RevIndex
 }
 
 // NewEncoder creates an Encoder that reads objects from source and uses
 // h for the file checksum.
-func NewEncoder(s storer.EncodedObjectStorer, h hash.Hash, index idxfile.OrdinalIndex) *Encoder {
+func NewEncoder(s storer.EncodedObjectStorer, h hash.Hash, index revfile.RevIndex) *Encoder {
 	return &Encoder{s: s, hasher: h, index: index}
 }
 
@@ -206,7 +206,7 @@ func (e *Encoder) commitReachability(
 	//	}
 	//}
 
-	packRank, ok := e.index.FindPackRank(commit)
+	packRank, ok := e.index.FindHashRank(commit)
 	if !ok {
 		return nil, fmt.Errorf("commit %s not found in pack", commit)
 	}
@@ -255,7 +255,7 @@ func (e *Encoder) walkTree(h plumbing.Hash, bm Bitmap) error {
 		cur := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 
-		packPos, ok := e.index.FindPackRank(cur)
+		packPos, ok := e.index.FindHashRank(cur)
 		if !ok {
 			continue
 		}
@@ -392,7 +392,7 @@ func (e *Encoder) SelectCommits(tips []plumbing.Hash, maxDistance int) ([]Select
 		h := queue[0]
 		queue = queue[1:]
 
-		idxPos, ok := e.index.FindPackRank(h)
+		idxPos, ok := e.index.FindHashRank(h)
 		if !ok {
 			return nil, fmt.Errorf("%w: commit %s", ErrMissingObject, h)
 		}
@@ -501,7 +501,7 @@ func (e *Encoder) reachability(commit plumbing.Hash) (Bitmap, error) {
 	bm := NewBitmap(count)
 	queue := make([]uint32, 0, 64)
 
-	packPos, ok := e.index.FindPackRank(commit)
+	packPos, ok := e.index.FindHashRank(commit)
 	if !ok {
 		return nil, fmt.Errorf("commit not found in pack")
 	}
@@ -554,7 +554,7 @@ func (e *Encoder) reachability(commit plumbing.Hash) (Bitmap, error) {
 // resolveHashes maps hashes to positions and appends them to the queue.
 func (e *Encoder) resolveHashes(queue []uint32, hashes ...plumbing.Hash) []uint32 {
 	for _, h := range hashes {
-		packPos, ok := e.index.FindPackRank(h)
+		packPos, ok := e.index.FindHashRank(h)
 		if ok {
 			queue = append(queue, packPos)
 		}

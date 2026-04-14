@@ -12,6 +12,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/idxfile"
 	"github.com/go-git/go-git/v6/plumbing/format/packfile"
+	"github.com/go-git/go-git/v6/plumbing/format/revfile"
 	"github.com/go-git/go-git/v6/plumbing/hash"
 	"github.com/go-git/go-git/v6/plumbing/revlist"
 	"github.com/go-git/go-git/v6/plumbing/storer"
@@ -31,9 +32,15 @@ type testPackSource struct {
 	// idxToHash maps idx position → hash.
 	idxToHash []plumbing.Hash
 	pf        *packfile.Packfile
+	revIdx    *revfile.MemoryRevIndex
 }
 
 var _ storer.EncodedObjectStorer = (*testPackSource)(nil)
+var _ Packfile = (*testPackSource)(nil)
+
+func (s *testPackSource) GetByOffset(offset int64) (plumbing.EncodedObject, error) {
+	return s.Object(uint32(offset))
+}
 
 func (s *testPackSource) RawObjectWriter(typ plumbing.ObjectType, sz int64) (w io.WriteCloser, err error) {
 	panic("implement me")
@@ -163,11 +170,14 @@ func openPackSourceByURL(t testing.TB, url string, h crypto.Hash) *testPackSourc
 	)
 	t.Cleanup(func() { pf.Close() })
 
+	revIdx := revfile.NewMemoryRevIndex(idx, offsetToIdx, h.Size())
+
 	return &testPackSource{
 		hashToOffset: hashToOffset,
 		offsetToIdx:  offsetToIdx,
 		idxToHash:    idxToHash,
 		pf:           pf,
+		revIdx:       revIdx,
 	}
 }
 
@@ -211,7 +221,7 @@ func TestPackerNegotiateWalk(t *testing.T) {
 	require.True(t, found, "need a commit without a bitmap entry")
 
 	commitHash := src.hashAtOffset(commitPos)
-	p := NewPacker(s, src, hash.New(crypto.SHA1))
+	p := NewPacker(s, src.revIdx, src, hash.New(crypto.SHA1))
 
 	bm, err := p.Negotiate([]plumbing.Hash{commitHash}, nil)
 	require.NoError(t, err)
@@ -226,7 +236,7 @@ func TestPackerNegotiate(t *testing.T) {
 	bitmapIdx, _ := openFixture(t)
 	src := openPackSource(t)
 	s := NewSearcher(bitmapIdx)
-	p := NewPacker(s, src, hash.New(crypto.SHA1))
+	p := NewPacker(s, src.revIdx, src, hash.New(crypto.SHA1))
 
 	e0 := bitmapIdx.Entry(0)
 	h0 := src.hashAtIdx(e0.ObjectPosition)
@@ -247,7 +257,7 @@ func TestReachabilityMissing(t *testing.T) {
 	bitmapIdx, _ := openFixture(t)
 	src := openPackSource(t)
 	s := NewSearcher(bitmapIdx)
-	p := NewPacker(s, src, hash.New(crypto.SHA1))
+	p := NewPacker(s, src.revIdx, src, hash.New(crypto.SHA1))
 
 	e0 := bitmapIdx.Entry(0)
 	valid := src.hashAtIdx(e0.ObjectPosition)
@@ -284,7 +294,7 @@ func TestPackerNegotiateWithHaves(t *testing.T) {
 	bitmapIdx, _ := openFixture(t)
 	src := openPackSource(t)
 	s := NewSearcher(bitmapIdx)
-	p := NewPacker(s, src, hash.New(crypto.SHA1))
+	p := NewPacker(s, src.revIdx, src, hash.New(crypto.SHA1))
 
 	e0 := bitmapIdx.Entry(0)
 	h0 := src.hashAtIdx(e0.ObjectPosition)
@@ -328,7 +338,7 @@ func TestNegotiateMatchesRevlistObjects(t *testing.T) {
 	sto := openReadOnlyStorer(t)
 
 	s := NewSearcher(bitmapIdx)
-	p := NewPacker(s, src, hash.New(crypto.SHA1))
+	p := NewPacker(s, src.revIdx, src, hash.New(crypto.SHA1))
 
 	e0 := bitmapIdx.Entry(0)
 	want := src.hashAtIdx(e0.ObjectPosition)
@@ -371,7 +381,7 @@ func TestNegotiateWalkMatchesRevlistObjects(t *testing.T) {
 	sto := openReadOnlyStorer(t)
 
 	s := NewSearcher(bitmapIdx)
-	p := NewPacker(s, src, hash.New(crypto.SHA1))
+	p := NewPacker(s, src.revIdx, src, hash.New(crypto.SHA1))
 	wants, haves := benchBitmapMiss()
 
 	// Bitmap path (walks graph until hitting a bitmap entry).
@@ -493,7 +503,7 @@ func BenchmarkNegotiate(b *testing.B) {
 
 	b.ResetTimer()
 	for b.Loop() {
-		p := NewPacker(s, src, hash.New(crypto.SHA1))
+		p := NewPacker(s, src.revIdx, src, hash.New(crypto.SHA1))
 		_, err := p.Negotiate([]plumbing.Hash{want}, []plumbing.Hash{have})
 		if err != nil {
 			b.Fatal(err)
@@ -510,7 +520,7 @@ func BenchmarkNegotiateWalk(b *testing.B) {
 
 	b.ResetTimer()
 	for b.Loop() {
-		p := NewPacker(s, src, hash.New(crypto.SHA1))
+		p := NewPacker(s, src.revIdx, src, hash.New(crypto.SHA1))
 		_, err := p.Negotiate(wants, haves)
 		if err != nil {
 			b.Fatal(err)

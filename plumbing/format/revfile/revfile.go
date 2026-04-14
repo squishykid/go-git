@@ -1,6 +1,8 @@
 package revfile
 
 import (
+	"io"
+
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/idxfile"
 )
@@ -30,6 +32,9 @@ type RevIndex interface {
 	// IdxPosAtPackRank returns the index position for the object
 	// at the given pack rank.
 	IdxPosAtPackRank(packRank uint32) (uint32, bool)
+	// FindHashRank returns the rank position of the object
+	// in the packfile, or [false].
+	FindHashRank(h plumbing.Hash) (uint32, bool)
 }
 
 type MemoryRevIndex struct {
@@ -42,6 +47,49 @@ var _ RevIndex = (*MemoryRevIndex)(nil)
 
 func NewMemoryRevIndex(index *idxfile.MemoryIndex, rev []uint32, hashSize int) *MemoryRevIndex {
 	return &MemoryRevIndex{MemoryIndex: index, rev: rev, hashSize: hashSize}
+}
+
+func Decode2(r io.Reader, count int64, packChecksum plumbing.ObjectID) ([]uint32, error) {
+	idxPos := make(chan uint32)
+	var got []uint32
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Decode(r, count, packChecksum, idxPos)
+	}()
+
+	for pos := range idxPos {
+		got = append(got, pos)
+	}
+
+	err := <-errCh
+	return got, err
+}
+
+func (o *MemoryRevIndex) FindHashRank(h plumbing.Hash) (uint32, bool) {
+	offset, err := o.MemoryIndex.FindOffset(h)
+	if err != nil {
+		return 0, false
+	}
+
+	n := uint32(len(o.rev))
+	lo, hi := uint32(0), n
+	for lo < hi {
+		mid := (lo + hi) / 2
+		midHash, ok := o.HashAtIdxRank(o.rev[mid])
+		if !ok {
+			return 0, false
+		}
+		midOffset, err := o.FindOffset(midHash)
+		if err != nil {
+			return 0, false
+		}
+		if midOffset < offset {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return lo, lo < n
 }
 
 func (o *MemoryRevIndex) HashAtIdxRank(idxPos uint32) (plumbing.Hash, bool) {

@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/format/idxfile"
+	"github.com/go-git/go-git/v6/plumbing/format/revfile"
 	"github.com/go-git/go-git/v6/plumbing/hash"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,7 +16,7 @@ import (
 
 // fixtureCommits returns the SelectedCommit list matching the fixture's
 // bitmap entries, suitable for passing to Encoder.Encode.
-func fixtureCommits(idx *Index, ordIdx idxfile.OrdinalIndex) []SelectedCommit {
+func fixtureCommits(idx *Index, ordIdx revfile.RevIndex) []SelectedCommit {
 	commits := make([]SelectedCommit, idx.EntryCount())
 	for i := range commits {
 		pos := idx.entries.commitPosition(i)

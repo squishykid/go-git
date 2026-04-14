@@ -38,9 +38,6 @@ type Index interface {
 	// EntriesByOffset returns an iterator to retrieve all index entries ordered
 	// by offset.
 	EntriesByOffset() (EntryIter, error)
-	// FindPackRank returns the pack-offset position of the object
-	// with the given hash, or [false].
-	FindPackRank(h plumbing.Hash) (uint32, bool)
 }
 
 // MemoryIndex is the in memory representation of an idx file.
@@ -84,11 +81,6 @@ func NewMemoryIndex(objectIDSize int) *MemoryIndex {
 	m.IdxChecksum.ResetBySize(objectIDSize)
 	m.PackfileChecksum.ResetBySize(objectIDSize)
 	return m
-}
-
-func (idx *MemoryIndex) FindPackRank(h plumbing.Hash) (uint32, bool) {
-	rank, ok := idx.findHashIndex(h)
-	return uint32(rank), ok
 }
 
 // todo this maps hash to packfile index
