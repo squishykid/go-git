@@ -5,6 +5,8 @@ import (
 	"math/bits"
 )
 
+// TODO move this to 'bitmapfile' package
+
 // Bitmap is a decompressed bitmap stored as a byte slice. Bits are
 // numbered using the git pack-bitmap convention: within each 64-bit
 // word (stored big-endian) bit 0 is the least-significant bit.
@@ -14,7 +16,7 @@ type Bitmap []byte
 // objectCount bits. The underlying slice is rounded up to a 64-bit
 // word boundary so Get/Set can address every bit without special
 // handling of a partial final word.
-func NewBitmap(objectCount int) Bitmap {
+func NewBitmap(objectCount int64) Bitmap {
 	return make(Bitmap, ((objectCount+63)/64)*8)
 }
 
@@ -121,7 +123,7 @@ func (it *SetBitsIterator) Next() (uint32, bool) {
 	for {
 		if it.rem != 0 {
 			bit := bits.TrailingZeros64(it.rem)
-			it.rem &= it.rem - 1 // clear lowest set bit
+			it.rem &= it.rem - 1            // clear lowest set bit
 			pos := it.word*64 + uint32(bit) //nolint:gosec
 			if it.rem == 0 {
 				it.word++
@@ -146,4 +148,3 @@ func (it *SetBitsIterator) advance() {
 	}
 	it.rem = 0
 }
-

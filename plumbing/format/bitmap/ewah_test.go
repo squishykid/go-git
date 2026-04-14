@@ -229,7 +229,7 @@ func TestEncodeEWAH(t *testing.T) {
 	t.Run("fixture round-trip", func(t *testing.T) {
 		t.Parallel()
 		// Decompress a real bitmap entry, re-encode, decode again.
-		idx := openFixture(t)
+		idx, _ := openFixture(t)
 		e := idx.Entry(0)
 
 		original, err := DecodeEWAH(e.Bitmap)

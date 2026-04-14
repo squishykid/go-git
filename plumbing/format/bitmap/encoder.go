@@ -15,28 +15,34 @@ import (
 
 // Encoder writes pack bitmap index files.
 type Encoder struct {
-	index *idxfile.MemoryIndex
-}
-
-type PackfileEntry struct {
-	Hash plumbing.Hash
+	s      storer.EncodedObjectStorer
+	hasher hash.Hash
+	index  idxfile.OrdinalIndex
 }
 
 // NewEncoder creates an Encoder that reads objects from source and uses
 // h for the file checksum.
-func NewEncoder(index *idxfile.MemoryIndex) *Encoder {
-	return &Encoder{index: index}
+func NewEncoder(s storer.EncodedObjectStorer, h hash.Hash, index idxfile.OrdinalIndex) *Encoder {
+	return &Encoder{s: s, hasher: h, index: index}
 }
 
 func (e *Encoder) typeBitmaps() ([4]EWAH, error) {
-	typeBitmaps := [4]Bitmap{
-		NewBitmap(len(e.entries)),
-		NewBitmap(len(e.entries)),
-		NewBitmap(len(e.entries)),
-		NewBitmap(len(e.entries)),
+	count, err := e.index.Count()
+	if err != nil {
+		return [4]EWAH{}, err
 	}
-	for pos, entry := range e.entries {
-		o, err := e.s.EncodedObject(plumbing.AnyObject, entry.Hash)
+	typeBitmaps := [4]Bitmap{
+		NewBitmap(count),
+		NewBitmap(count),
+		NewBitmap(count),
+		NewBitmap(count),
+	}
+	for pos := range count {
+		h, ok := e.index.HashAtPackRank(uint32(pos))
+		if !ok {
+			return [4]EWAH{}, fmt.Errorf("nothing at position %d", pos)
+		}
+		o, err := e.s.EncodedObject(plumbing.AnyObject, h)
 		if err != nil {
 			return [4]EWAH{}, err
 		}
@@ -72,11 +78,6 @@ func (e *Encoder) Encode(w io.Writer, packChecksum plumbing.Hash, commits []Sele
 	e.hasher.Reset()
 	hw := io.MultiWriter(w, e.hasher)
 
-	reverse := map[plumbing.Hash]uint32{}
-	for i, commit := range e.entries {
-		reverse[commit.Hash] = uint32(i)
-	}
-
 	// --- Build type bitmaps ---
 	typeEwahs, err := e.typeBitmaps()
 	if err != nil {
@@ -106,7 +107,7 @@ func (e *Encoder) Encode(w io.Writer, packChecksum plumbing.Hash, commits []Sele
 	slices.Reverse(sorted)
 
 	for _, sc := range sorted {
-		bm, err := e.commitReachability(sc.Hash, reverse, computed)
+		bm, err := e.commitReachability(sc.Hash, computed)
 		if err != nil {
 			return fmt.Errorf("computing reachability for %s: %w", sc.Hash, err)
 		}
@@ -188,7 +189,6 @@ func (e *Encoder) Encode(w io.Writer, packChecksum plumbing.Hash, commits []Sele
 // checked first.
 func (e *Encoder) commitReachability(
 	commit plumbing.Hash,
-	reverse map[plumbing.Hash]uint32,
 	computed map[plumbing.Hash]Bitmap,
 	// old *Searcher,
 ) (Bitmap, error) {
@@ -206,13 +206,17 @@ func (e *Encoder) commitReachability(
 	//	}
 	//}
 
-	packPos, ok := reverse[commit]
+	packRank, ok := e.index.FindPackRank(commit)
 	if !ok {
 		return nil, fmt.Errorf("commit %s not found in pack", commit)
 	}
 
-	bm := NewBitmap(len(e.entries))
-	bm.Set(packPos)
+	count, err := e.index.Count()
+	if err != nil {
+		return nil, err
+	}
+	bm := NewBitmap(count)
+	bm.Set(packRank)
 
 	// Walk the commit's tree.
 	obj, err := e.s.EncodedObject(plumbing.CommitObject, commit)
@@ -223,7 +227,7 @@ func (e *Encoder) commitReachability(
 	if err != nil {
 		return nil, err
 	}
-	if err := e.walkTree(tree, reverse, bm); err != nil {
+	if err := e.walkTree(tree, bm); err != nil {
 		return nil, err
 	}
 
@@ -233,7 +237,7 @@ func (e *Encoder) commitReachability(
 			bm.Or(pbm)
 		} else {
 			// Parent not in the selected set — walk its full graph.
-			pbm, err := e.reachability(p, reverse)
+			pbm, err := e.reachability(p)
 			if err != nil {
 				return nil, err
 			}
@@ -245,13 +249,13 @@ func (e *Encoder) commitReachability(
 }
 
 // walkTree sets bits for the tree at h and all its descendants.
-func (e *Encoder) walkTree(h plumbing.Hash, reverse map[plumbing.Hash]uint32, bm Bitmap) error {
+func (e *Encoder) walkTree(h plumbing.Hash, bm Bitmap) error {
 	stack := []plumbing.Hash{h}
 	for len(stack) > 0 {
 		cur := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 
-		packPos, ok := reverse[cur]
+		packPos, ok := e.index.FindPackRank(cur)
 		if !ok {
 			continue
 		}
@@ -364,7 +368,7 @@ type SelectedCommit struct {
 // when it is at least maxDistance commits from the previous selection
 // along its first-parent chain, or when it is the tip itself.
 // A maxDistance of 0 selects every commit.
-func (e *Encoder) SelectCommits(tips []plumbing.Hash, reverse map[plumbing.Hash]uint32, maxDistance int) ([]SelectedCommit, error) {
+func (e *Encoder) SelectCommits(tips []plumbing.Hash, maxDistance int) ([]SelectedCommit, error) {
 	type commitInfo struct {
 		hash   plumbing.Hash
 		idxPos uint32
@@ -388,7 +392,7 @@ func (e *Encoder) SelectCommits(tips []plumbing.Hash, reverse map[plumbing.Hash]
 		h := queue[0]
 		queue = queue[1:]
 
-		idxPos, ok := reverse[h]
+		idxPos, ok := e.index.FindPackRank(h)
 		if !ok {
 			return nil, fmt.Errorf("%w: commit %s", ErrMissingObject, h)
 		}
@@ -409,7 +413,7 @@ func (e *Encoder) SelectCommits(tips []plumbing.Hash, reverse map[plumbing.Hash]
 		}
 
 		// Verify the tree (and its children) are in the pack.
-		if err := verifyReachable(e.s, reverse, tree, visited, hashSize); err != nil {
+		if err := verifyReachable(e.s, tree, visited, hashSize); err != nil {
 			return nil, err
 		}
 
@@ -455,7 +459,7 @@ func (e *Encoder) SelectCommits(tips []plumbing.Hash, reverse map[plumbing.Hash]
 
 // verifyReachable checks that the tree at h and all its descendants
 // are in the pack. It adds verified hashes to visited.
-func verifyReachable(s storer.EncodedObjectStorer, reverse map[plumbing.Hash]uint32, h plumbing.Hash, visited map[plumbing.Hash]struct{}, hashSize int) error {
+func verifyReachable(s storer.EncodedObjectStorer, h plumbing.Hash, visited map[plumbing.Hash]struct{}, hashSize int) error {
 	stack := []plumbing.Hash{h}
 	for len(stack) > 0 {
 		cur := stack[len(stack)-1]
@@ -484,26 +488,20 @@ func verifyReachable(s storer.EncodedObjectStorer, reverse map[plumbing.Hash]uin
 
 // reachability computes the full reachability bitmap for a commit.
 // If old is provided, it tries to reuse the precomputed bitmap.
-func (e *Encoder) reachability(commit plumbing.Hash, reverse map[plumbing.Hash]uint32) (Bitmap, error) {
+func (e *Encoder) reachability(commit plumbing.Hash) (Bitmap, error) {
 	// Try reusing from old bitmap.
 	// TODO: calculate bitmap transform from old bitmap to new bitmap
-	//if old != nil {
-	//	idxPos, _, ok := e.source.FindPosition(commit)
-	//	if ok {
-	//		oldBm, err := old.Reachable(idxPos)
-	//		if err == nil {
-	//			bm := make(Bitmap, bmLen)
-	//			copy(bm, oldBm)
-	//			return bm, nil
-	//		}
-	//	}
-	//}
 
 	// Walk the graph from scratch.
-	bm := NewBitmap(len(e.entries))
+	count, err := e.index.Count()
+	if err != nil {
+		return nil, err
+	}
+
+	bm := NewBitmap(count)
 	queue := make([]uint32, 0, 64)
 
-	packPos, ok := reverse[commit]
+	packPos, ok := e.index.FindPackRank(commit)
 	if !ok {
 		return nil, fmt.Errorf("commit not found in pack")
 	}
@@ -518,8 +516,8 @@ func (e *Encoder) reachability(commit plumbing.Hash, reverse map[plumbing.Hash]u
 		}
 		bm.Set(curPackPos)
 
-		entry := e.entries[curPackPos]
-		o, err := e.s.EncodedObject(plumbing.AnyObject, entry.Hash)
+		entry, _ := e.index.HashAtPackRank(curPackPos)
+		o, err := e.s.EncodedObject(plumbing.AnyObject, entry)
 		if err != nil {
 			return nil, err
 		}
@@ -531,22 +529,22 @@ func (e *Encoder) reachability(commit plumbing.Hash, reverse map[plumbing.Hash]u
 			if err != nil {
 				return nil, err
 			}
-			queue = resolveHashes(reverse, queue, tree)
-			queue = resolveHashes(reverse, queue, parents...)
+			queue = e.resolveHashes(queue, tree)
+			queue = e.resolveHashes(queue, parents...)
 
 		case plumbing.TreeObject:
 			entries, err := parseTreeObj(o, e.hasher.Size())
 			if err != nil {
 				return nil, err
 			}
-			queue = resolveHashes(reverse, queue, entries...)
+			queue = e.resolveHashes(queue, entries...)
 
 		case plumbing.TagObject:
 			target, err := parseTagObj(o)
 			if err != nil {
 				return nil, err
 			}
-			queue = resolveHashes(reverse, queue, target)
+			queue = e.resolveHashes(queue, target)
 		}
 	}
 
@@ -554,9 +552,9 @@ func (e *Encoder) reachability(commit plumbing.Hash, reverse map[plumbing.Hash]u
 }
 
 // resolveHashes maps hashes to positions and appends them to the queue.
-func resolveHashes(reverse map[plumbing.Hash]uint32, queue []uint32, hashes ...plumbing.Hash) []uint32 {
+func (e *Encoder) resolveHashes(queue []uint32, hashes ...plumbing.Hash) []uint32 {
 	for _, h := range hashes {
-		packPos, ok := reverse[h]
+		packPos, ok := e.index.FindPackRank(h)
 		if ok {
 			queue = append(queue, packPos)
 		}

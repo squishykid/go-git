@@ -8,21 +8,21 @@ import (
 	"testing"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/format/idxfile"
 	"github.com/go-git/go-git/v6/plumbing/hash"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-var _ = plumbing.ZeroHash // keep import
-
 // fixtureCommits returns the SelectedCommit list matching the fixture's
 // bitmap entries, suitable for passing to Encoder.Encode.
-func fixtureCommits(idx *Index, src *testPackSource) []SelectedCommit {
+func fixtureCommits(idx *Index, ordIdx idxfile.OrdinalIndex) []SelectedCommit {
 	commits := make([]SelectedCommit, idx.EntryCount())
 	for i := range commits {
 		pos := idx.entries.commitPosition(i)
+		h, _ := ordIdx.HashAtIdxRank(pos)
 		commits[i] = SelectedCommit{
-			Hash:   src.hashAtIdx(pos),
+			Hash:   h,
 			IdxPos: pos,
 		}
 	}
@@ -32,14 +32,14 @@ func fixtureCommits(idx *Index, src *testPackSource) []SelectedCommit {
 func TestEncodeRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	bitmapIdx := openFixture(t)
+	bitmapIdx, ordIdx := openFixture(t)
 	src := openPackSource(t)
 
-	commits := fixtureCommits(bitmapIdx, src)
+	commits := fixtureCommits(bitmapIdx, ordIdx)
 
-	packChecksum := bitmapIdx.PackChecksum()
+	packChecksum, _ := plumbing.FromBytes(bitmapIdx.PackChecksum())
 
-	enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
+	enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
 	var buf bytes.Buffer
 	err := enc.Encode(&buf, packChecksum, commits)
 	require.NoError(t, err)
@@ -51,7 +51,7 @@ func TestEncodeRoundTrip(t *testing.T) {
 	// Header checks.
 	assert.Equal(t, uint16(1), result.Version())
 	assert.Equal(t, uint16(OptFullDAG), result.Flags())
-	assert.Equal(t, hex.EncodeToString(packChecksum), hex.EncodeToString(result.PackChecksum()))
+	assert.Equal(t, hex.EncodeToString(bitmapIdx.PackChecksum()), hex.EncodeToString(result.PackChecksum()))
 	assert.Equal(t, uint32(len(commits)), result.EntryCount())
 
 	// Type bitmaps should have the same bit counts as the fixture.
@@ -64,14 +64,15 @@ func TestEncodeRoundTrip(t *testing.T) {
 func TestEncodeMatchesFixture(t *testing.T) {
 	t.Parallel()
 
-	bitmapIdx := openFixture(t)
+	bitmapIdx, ordIdx := openFixture(t)
 	src := openPackSource(t)
 
-	commits := fixtureCommits(bitmapIdx, src)
+	commits := fixtureCommits(bitmapIdx, ordIdx)
+	packChecksum, _ := plumbing.FromBytes(bitmapIdx.PackChecksum())
 
-	enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
+	enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
 	var buf bytes.Buffer
-	err := enc.Encode(&buf, bitmapIdx.PackChecksum(), commits)
+	err := enc.Encode(&buf, packChecksum, commits)
 	require.NoError(t, err)
 
 	result, err := Open(buf.Bytes(), hash.New(crypto.SHA1))
@@ -98,14 +99,15 @@ func TestEncodeMatchesFixture(t *testing.T) {
 func TestEncodeSHA256(t *testing.T) {
 	t.Parallel()
 
-	bitmapIdx := openFixtureByURL(t, "https://gitlab.com/pjbgf/sha256.git", crypto.SHA256)
+	bitmapIdx, ordIdx := openFixtureByURL(t, "https://gitlab.com/pjbgf/sha256.git", crypto.SHA256)
 	src := openPackSourceByURL(t, "https://gitlab.com/pjbgf/sha256.git", crypto.SHA256)
 
-	commits := fixtureCommits(bitmapIdx, src)
+	commits := fixtureCommits(bitmapIdx, ordIdx)
+	packChecksum, _ := plumbing.FromBytes(bitmapIdx.PackChecksum())
 
-	enc := NewEncoder(src, hash.New(crypto.SHA256), src.Entries())
+	enc := NewEncoder(src, hash.New(crypto.SHA256), ordIdx)
 	var buf bytes.Buffer
-	err := enc.Encode(&buf, bitmapIdx.PackChecksum(), commits)
+	err := enc.Encode(&buf, packChecksum, commits)
 	require.NoError(t, err)
 
 	result, err := Open(buf.Bytes(), hash.New(crypto.SHA256))
@@ -129,20 +131,14 @@ func TestEncodeSHA256(t *testing.T) {
 func TestSelectCommits(t *testing.T) {
 	t.Parallel()
 
-	bitmapIdx := openFixture(t)
+	bitmapIdx, ordIdx := openFixture(t)
 	src := openPackSource(t)
 
 	// Use the fixture's HEAD as the tip.
-	head := src.hashAtIdx(bitmapIdx.entries.commitPosition(0))
+	head, _ := ordIdx.HashAtIdxRank(bitmapIdx.entries.commitPosition(0))
 
-	enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
-	// SelectCommits expects hash → idx (hash-sorted) position so the
-	// resulting SelectedCommit.IdxPos can be written into the entry header.
-	reverse := map[plumbing.Hash]uint32{}
-	for i, h := range src.idxToHash {
-		reverse[h] = uint32(i)
-	}
-	commits, err := enc.SelectCommits([]plumbing.Hash{head}, reverse, 0)
+	enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
+	commits, err := enc.SelectCommits([]plumbing.Hash{head}, 0)
 	require.NoError(t, err)
 
 	// With maxDistance=0, every reachable commit should be selected.
@@ -156,29 +152,22 @@ func TestSelectCommits(t *testing.T) {
 		_, packPos, ok := src.FindPosition(sc.Hash)
 		require.True(t, ok)
 		assert.Equal(t, plumbing.CommitObject, src.ObjectType(packPos))
-		assert.Equal(t, sc.IdxPos, src.offsetToIdx[packPos])
 	}
 }
 
 func TestSelectCommitsDistance(t *testing.T) {
 	t.Parallel()
 
-	bitmapIdx := openFixture(t)
+	bitmapIdx, ordIdx := openFixture(t)
 	src := openPackSource(t)
 
-	head := src.hashAtIdx(bitmapIdx.entries.commitPosition(0))
-	enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
-	// SelectCommits expects hash → idx (hash-sorted) position so the
-	// resulting SelectedCommit.IdxPos can be written into the entry header.
-	reverse := map[plumbing.Hash]uint32{}
-	for i, h := range src.idxToHash {
-		reverse[h] = uint32(i)
-	}
+	head, _ := ordIdx.HashAtIdxRank(bitmapIdx.entries.commitPosition(0))
+	enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
 
-	all, err := enc.SelectCommits([]plumbing.Hash{head}, reverse, 0)
+	all, err := enc.SelectCommits([]plumbing.Hash{head}, 0)
 	require.NoError(t, err)
 
-	sparse, err := enc.SelectCommits([]plumbing.Hash{head}, reverse, 100)
+	sparse, err := enc.SelectCommits([]plumbing.Hash{head}, 100)
 	require.NoError(t, err)
 
 	// Sparse selection should have fewer commits.
@@ -192,19 +181,13 @@ func TestSelectCommitsDistance(t *testing.T) {
 func TestTopoSort(t *testing.T) {
 	t.Parallel()
 
-	bitmapIdx := openFixture(t)
+	bitmapIdx, ordIdx := openFixture(t)
 	src := openPackSource(t)
 
-	head := src.hashAtIdx(bitmapIdx.entries.commitPosition(0))
-	enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
-	// SelectCommits expects hash → idx (hash-sorted) position so the
-	// resulting SelectedCommit.IdxPos can be written into the entry header.
-	reverse := map[plumbing.Hash]uint32{}
-	for i, h := range src.idxToHash {
-		reverse[h] = uint32(i)
-	}
+	head, _ := ordIdx.HashAtIdxRank(bitmapIdx.entries.commitPosition(0))
+	enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
 
-	commits, err := enc.SelectCommits([]plumbing.Hash{head}, reverse, 0)
+	commits, err := enc.SelectCommits([]plumbing.Hash{head}, 0)
 	require.NoError(t, err)
 
 	sorted, err := TopoSort(src, commits)
@@ -241,18 +224,13 @@ func TestTopoSort(t *testing.T) {
 func TestSelectCommitsMissingObject(t *testing.T) {
 	t.Parallel()
 
+	_, ordIdx := openFixture(t)
 	src := openPackSource(t)
-	enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
-	// SelectCommits expects hash → idx (hash-sorted) position so the
-	// resulting SelectedCommit.IdxPos can be written into the entry header.
-	reverse := map[plumbing.Hash]uint32{}
-	for i, h := range src.idxToHash {
-		reverse[h] = uint32(i)
-	}
+	enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
 
 	// Use a hash that's not in the pack.
 	bogus, _ := plumbing.FromHex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	_, err := enc.SelectCommits([]plumbing.Hash{bogus}, reverse, 0)
+	_, err := enc.SelectCommits([]plumbing.Hash{bogus}, 0)
 	assert.ErrorIs(t, err, ErrMissingObject)
 }
 
@@ -296,20 +274,15 @@ func findTips(t testing.TB, src *testPackSource) []plumbing.Hash {
 }
 
 func BenchmarkSelectCommits(b *testing.B) {
+	_, ordIdx := openFixture(b)
 	src := openPackSource(b)
-	enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
-	// SelectCommits expects hash → idx (hash-sorted) position so the
-	// resulting SelectedCommit.IdxPos can be written into the entry header.
-	reverse := map[plumbing.Hash]uint32{}
-	for i, h := range src.idxToHash {
-		reverse[h] = uint32(i)
-	}
+	enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
 	tips := findTips(b, src)
 	b.Logf("tips=%d objects=%d", len(tips), src.ObjectCount())
 
 	b.ResetTimer()
 	for b.Loop() {
-		_, err := enc.SelectCommits(tips, reverse, 100)
+		_, err := enc.SelectCommits(tips, 100)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -336,15 +309,15 @@ func BenchmarkSelectCommits(b *testing.B) {
 //}
 
 func BenchmarkEncode(b *testing.B) {
-	bitmapIdx := openFixture(b)
+	bitmapIdx, ordIdx := openFixture(b)
 	src := openPackSource(b)
 
-	commits := fixtureCommits(bitmapIdx, src)
-	packChecksum := bitmapIdx.PackChecksum()
+	commits := fixtureCommits(bitmapIdx, ordIdx)
+	packChecksum, _ := plumbing.FromBytes(bitmapIdx.PackChecksum())
 
 	b.ResetTimer()
 	for b.Loop() {
-		enc := NewEncoder(src, hash.New(crypto.SHA1), src.Entries())
+		enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
 		err := enc.Encode(io.Discard, packChecksum, commits)
 		if err != nil {
 			b.Fatal(err)

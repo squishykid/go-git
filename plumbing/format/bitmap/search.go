@@ -15,6 +15,7 @@ type Searcher struct {
 	// entryIndex maps ObjectPosition (idx position) to the entry
 	// ordinal in the bitmap file.
 	// TODO: optimise with scannedOffsets
+	// TODO: why is this based on the index rank? why not packfile rank?
 	entryIndex map[uint32]int
 	// cache holds decompressed and XOR-resolved bitmaps, keyed by
 	// entry ordinal. Populated lazily on first access.

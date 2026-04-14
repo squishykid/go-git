@@ -33,25 +33,7 @@ type testPackSource struct {
 	pf        *packfile.Packfile
 }
 
-type testPackfileEntry struct {
-	Hash plumbing.Hash
-}
-
-func (e testPackfileEntry) GetHash() plumbing.Hash {
-	return e.Hash
-}
-
 var _ storer.EncodedObjectStorer = (*testPackSource)(nil)
-
-// Entries returns one entry per object in pack-offset order, matching
-// the position space used by bitmap bits.
-func (s *testPackSource) Entries() []PackfileEntry {
-	entries := make([]PackfileEntry, len(s.offsetToIdx))
-	for packPos, idxPos := range s.offsetToIdx {
-		entries[packPos] = testPackfileEntry{Hash: s.idxToHash[idxPos]}
-	}
-	return entries
-}
 
 func (s *testPackSource) RawObjectWriter(typ plumbing.ObjectType, sz int64) (w io.WriteCloser, err error) {
 	panic("implement me")
@@ -202,7 +184,7 @@ func (s *testPackSource) hashAtIdx(idxPos uint32) plumbing.Hash {
 func TestPackerNegotiateWalk(t *testing.T) {
 	t.Parallel()
 
-	bitmapIdx := openFixture(t)
+	bitmapIdx, _ := openFixture(t)
 	src := openPackSource(t)
 	s := NewSearcher(bitmapIdx)
 
@@ -241,7 +223,7 @@ func TestPackerNegotiateWalk(t *testing.T) {
 func TestPackerNegotiate(t *testing.T) {
 	t.Parallel()
 
-	bitmapIdx := openFixture(t)
+	bitmapIdx, _ := openFixture(t)
 	src := openPackSource(t)
 	s := NewSearcher(bitmapIdx)
 	p := NewPacker(s, src, hash.New(crypto.SHA1))
@@ -262,7 +244,7 @@ func TestPackerNegotiate(t *testing.T) {
 func TestReachabilityMissing(t *testing.T) {
 	t.Parallel()
 
-	bitmapIdx := openFixture(t)
+	bitmapIdx, _ := openFixture(t)
 	src := openPackSource(t)
 	s := NewSearcher(bitmapIdx)
 	p := NewPacker(s, src, hash.New(crypto.SHA1))
@@ -299,7 +281,7 @@ func TestReachabilityMissing(t *testing.T) {
 func TestPackerNegotiateWithHaves(t *testing.T) {
 	t.Parallel()
 
-	bitmapIdx := openFixture(t)
+	bitmapIdx, _ := openFixture(t)
 	src := openPackSource(t)
 	s := NewSearcher(bitmapIdx)
 	p := NewPacker(s, src, hash.New(crypto.SHA1))
@@ -341,7 +323,7 @@ func openReadOnlyStorer(t testing.TB) *readOnlyStorer {
 func TestNegotiateMatchesRevlistObjects(t *testing.T) {
 	t.Parallel()
 
-	bitmapIdx := openFixture(t)
+	bitmapIdx, _ := openFixture(t)
 	src := openPackSource(t)
 	sto := openReadOnlyStorer(t)
 
@@ -384,7 +366,7 @@ func TestNegotiateMatchesRevlistObjects(t *testing.T) {
 func TestNegotiateWalkMatchesRevlistObjects(t *testing.T) {
 	t.Parallel()
 
-	bitmapIdx := openFixture(t)
+	bitmapIdx, _ := openFixture(t)
 	src := openPackSource(t)
 	sto := openReadOnlyStorer(t)
 
@@ -504,7 +486,7 @@ func benchBitmapMiss() (wants, haves []plumbing.Hash) {
 }
 
 func BenchmarkNegotiate(b *testing.B) {
-	bitmapIdx := openFixture(b)
+	bitmapIdx, _ := openFixture(b)
 	src := openPackSource(b)
 	s := NewSearcher(bitmapIdx)
 	want, have := benchWantHave(b, bitmapIdx, src)
@@ -520,7 +502,7 @@ func BenchmarkNegotiate(b *testing.B) {
 }
 
 func BenchmarkNegotiateWalk(b *testing.B) {
-	bitmapIdx := openFixture(b)
+	bitmapIdx, _ := openFixture(b)
 	src := openPackSource(b)
 	s := NewSearcher(bitmapIdx)
 
@@ -550,7 +532,7 @@ func BenchmarkRevlistObjectsWalk(b *testing.B) {
 }
 
 func BenchmarkRevlistObjects(b *testing.B) {
-	bitmapIdx := openFixture(b)
+	bitmapIdx, _ := openFixture(b)
 	src := openPackSource(b)
 	sto := openReadOnlyStorer(b)
 	want, have := benchWantHave(b, bitmapIdx, src)

@@ -8,7 +8,7 @@ import (
 )
 
 func BenchmarkReachable(b *testing.B) {
-	idx := openFixture(b)
+	idx, _ := openFixture(b)
 	s := NewSearcher(idx)
 
 	lastEntry := idx.Entry(int(idx.EntryCount() - 1))
@@ -26,7 +26,7 @@ func BenchmarkReachable(b *testing.B) {
 func TestSearcherReachable(t *testing.T) {
 	t.Parallel()
 
-	idx := openFixture(t)
+	idx, _ := openFixture(t)
 	s := NewSearcher(idx)
 
 	e := idx.Entry(0)
@@ -46,7 +46,7 @@ func TestSearcherReachable(t *testing.T) {
 func TestSearcherXORResolution(t *testing.T) {
 	t.Parallel()
 
-	idx := openFixture(t)
+	idx, _ := openFixture(t)
 	s := NewSearcher(idx)
 
 	e := idx.Entry(1)
@@ -67,7 +67,7 @@ func TestSearcherXORResolution(t *testing.T) {
 func TestSearcherReachableCommits(t *testing.T) {
 	t.Parallel()
 
-	idx := openFixture(t)
+	idx, _ := openFixture(t)
 	s := NewSearcher(idx)
 
 	commitsBm, err := DecodeEWAH(idx.Commits())
@@ -103,7 +103,7 @@ func TestSearcherReachableCommits(t *testing.T) {
 func TestSearcherNotFound(t *testing.T) {
 	t.Parallel()
 
-	idx := openFixture(t)
+	idx, _ := openFixture(t)
 	s := NewSearcher(idx)
 
 	_, err := s.Reachable(999999)
