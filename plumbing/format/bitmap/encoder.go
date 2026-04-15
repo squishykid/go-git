@@ -8,23 +8,22 @@ import (
 	"slices"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/format/packfile"
 	"github.com/go-git/go-git/v6/plumbing/format/revfile"
 	"github.com/go-git/go-git/v6/plumbing/hash"
-	"github.com/go-git/go-git/v6/plumbing/storer"
 )
 
 // Encoder writes pack bitmap index files.
 type Encoder struct {
-	s      storer.EncodedObjectStorer
+	pf     *packfile.Packfile
 	hasher hash.Hash
 	index  revfile.RevIndex
 }
 
-// NewEncoder creates an Encoder that reads objects from source and uses
+// NewEncoder creates an Encoder that reads objects from pf and uses
 // h for the file checksum.
-// TODO make storer be just a packfile, then we don't need to implement the magic
-func NewEncoder(s storer.EncodedObjectStorer, h hash.Hash, index revfile.RevIndex) *Encoder {
-	return &Encoder{s: s, hasher: h, index: index}
+func NewEncoder(pf *packfile.Packfile, h hash.Hash, index revfile.RevIndex) *Encoder {
+	return &Encoder{pf: pf, hasher: h, index: index}
 }
 
 func (e *Encoder) typeBitmaps() ([4]EWAH, error) {
@@ -43,7 +42,7 @@ func (e *Encoder) typeBitmaps() ([4]EWAH, error) {
 		if !ok {
 			return [4]EWAH{}, fmt.Errorf("nothing at position %d", pos)
 		}
-		o, err := e.s.EncodedObject(plumbing.AnyObject, h)
+		o, err := e.pf.Get(h)
 		if err != nil {
 			return [4]EWAH{}, err
 		}
@@ -90,7 +89,7 @@ func (e *Encoder) Encode(w io.Writer, packChecksum plumbing.Hash, commits []Sele
 	// Ensure children come before parents so that when computing a
 	// commit's reachability bitmap we can OR in already-computed
 	// parent bitmaps instead of re-walking the full history.
-	sorted, err := TopoSort(e.s, commits)
+	sorted, err := TopoSort(e.pf, commits)
 	if err != nil {
 		return fmt.Errorf("topological sort: %w", err)
 	}
@@ -220,7 +219,7 @@ func (e *Encoder) commitReachability(
 	bm.Set(packRank)
 
 	// Walk the commit's tree.
-	obj, err := e.s.EncodedObject(plumbing.CommitObject, commit)
+	obj, err := e.pf.Get(commit)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +265,7 @@ func (e *Encoder) walkTree(h plumbing.Hash, bm Bitmap) error {
 		}
 		bm.Set(packPos)
 
-		obj, err := e.s.EncodedObject(plumbing.AnyObject, cur)
+		obj, err := e.pf.Get(cur)
 		if err != nil {
 			return err
 		}
@@ -293,7 +292,7 @@ var ErrMissingObject = errors.New("pack missing reachable object")
 //
 // Only parent relationships between commits in the input set are
 // considered. Parents outside the set are ignored.
-func TopoSort(s storer.EncodedObjectStorer, commits []SelectedCommit) ([]SelectedCommit, error) {
+func TopoSort(pf *packfile.Packfile, commits []SelectedCommit) ([]SelectedCommit, error) {
 	// Build the set of selected commits and an adjacency list of
 	// parent edges within the set.
 	idx := make(map[plumbing.Hash]int, len(commits))
@@ -307,7 +306,7 @@ func TopoSort(s storer.EncodedObjectStorer, commits []SelectedCommit) ([]Selecte
 	inDegree := make([]int, len(commits))
 
 	for i, sc := range commits {
-		obj, err := s.EncodedObject(plumbing.CommitObject, sc.Hash)
+		obj, err := pf.Get(sc.Hash)
 		if err != nil {
 			return nil, fmt.Errorf("reading commit %s: %w", sc.Hash, err)
 		}
@@ -399,7 +398,7 @@ func (e *Encoder) SelectCommits(tips []plumbing.Hash, maxDistance int) ([]Select
 			return nil, fmt.Errorf("%w: commit %s", ErrMissingObject, h)
 		}
 
-		obj, err := e.s.EncodedObject(plumbing.AnyObject, h)
+		obj, err := e.pf.Get(h)
 		if err != nil {
 			return nil, fmt.Errorf("reading commit %s: %w", h, err)
 		}
@@ -415,7 +414,7 @@ func (e *Encoder) SelectCommits(tips []plumbing.Hash, maxDistance int) ([]Select
 		}
 
 		// Verify the tree (and its children) are in the pack.
-		if err := verifyReachable(e.s, tree, visited, hashSize); err != nil {
+		if err := verifyReachable(e.pf, tree, visited, hashSize); err != nil {
 			return nil, err
 		}
 
@@ -461,7 +460,7 @@ func (e *Encoder) SelectCommits(tips []plumbing.Hash, maxDistance int) ([]Select
 
 // verifyReachable checks that the tree at h and all its descendants
 // are in the pack. It adds verified hashes to visited.
-func verifyReachable(s storer.EncodedObjectStorer, h plumbing.Hash, visited map[plumbing.Hash]struct{}, hashSize int) error {
+func verifyReachable(pf *packfile.Packfile, h plumbing.Hash, visited map[plumbing.Hash]struct{}, hashSize int) error {
 	stack := []plumbing.Hash{h}
 	for len(stack) > 0 {
 		cur := stack[len(stack)-1]
@@ -472,7 +471,7 @@ func verifyReachable(s storer.EncodedObjectStorer, h plumbing.Hash, visited map[
 		}
 		visited[cur] = struct{}{}
 
-		obj, err := s.EncodedObject(plumbing.AnyObject, cur)
+		obj, err := pf.Get(cur)
 		if err != nil {
 			return fmt.Errorf("reading object %s: %w", cur, err)
 		}
@@ -519,7 +518,7 @@ func (e *Encoder) reachability(commit plumbing.Hash) (Bitmap, error) {
 		bm.Set(curPackPos)
 
 		entry, _ := e.index.HashAtPackRank(curPackPos)
-		o, err := e.s.EncodedObject(plumbing.AnyObject, entry)
+		o, err := e.pf.Get(entry)
 		if err != nil {
 			return nil, err
 		}

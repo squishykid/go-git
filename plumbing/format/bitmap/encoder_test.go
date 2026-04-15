@@ -39,7 +39,7 @@ func TestEncodeRoundTrip(t *testing.T) {
 
 	packChecksum, _ := plumbing.FromBytes(bitmapIdx.PackChecksum())
 
-	enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
+	enc := NewEncoder(src.pf, hash.New(crypto.SHA1), ordIdx)
 	var buf bytes.Buffer
 	err := enc.Encode(&buf, packChecksum, commits)
 	require.NoError(t, err)
@@ -70,7 +70,7 @@ func TestEncodeMatchesFixture(t *testing.T) {
 	commits := fixtureCommits(bitmapIdx, ordIdx)
 	packChecksum, _ := plumbing.FromBytes(bitmapIdx.PackChecksum())
 
-	enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
+	enc := NewEncoder(src.pf, hash.New(crypto.SHA1), ordIdx)
 	var buf bytes.Buffer
 	err := enc.Encode(&buf, packChecksum, commits)
 	require.NoError(t, err)
@@ -105,7 +105,7 @@ func TestEncodeSHA256(t *testing.T) {
 	commits := fixtureCommits(bitmapIdx, ordIdx)
 	packChecksum, _ := plumbing.FromBytes(bitmapIdx.PackChecksum())
 
-	enc := NewEncoder(src, hash.New(crypto.SHA256), ordIdx)
+	enc := NewEncoder(src.pf, hash.New(crypto.SHA256), ordIdx)
 	var buf bytes.Buffer
 	err := enc.Encode(&buf, packChecksum, commits)
 	require.NoError(t, err)
@@ -137,7 +137,7 @@ func TestSelectCommits(t *testing.T) {
 	// Use the fixture's HEAD as the tip.
 	head, _ := ordIdx.HashAtIdxRank(bitmapIdx.entries.commitPosition(0))
 
-	enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
+	enc := NewEncoder(src.pf, hash.New(crypto.SHA1), ordIdx)
 	commits, err := enc.SelectCommits([]plumbing.Hash{head}, 0)
 	require.NoError(t, err)
 
@@ -162,7 +162,7 @@ func TestSelectCommitsDistance(t *testing.T) {
 	src := openPackSource(t)
 
 	head, _ := ordIdx.HashAtIdxRank(bitmapIdx.entries.commitPosition(0))
-	enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
+	enc := NewEncoder(src.pf, hash.New(crypto.SHA1), ordIdx)
 
 	all, err := enc.SelectCommits([]plumbing.Hash{head}, 0)
 	require.NoError(t, err)
@@ -185,12 +185,12 @@ func TestTopoSort(t *testing.T) {
 	src := openPackSource(t)
 
 	head, _ := ordIdx.HashAtIdxRank(bitmapIdx.entries.commitPosition(0))
-	enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
+	enc := NewEncoder(src.pf, hash.New(crypto.SHA1), ordIdx)
 
 	commits, err := enc.SelectCommits([]plumbing.Hash{head}, 0)
 	require.NoError(t, err)
 
-	sorted, err := TopoSort(src, commits)
+	sorted, err := TopoSort(src.pf, commits)
 	require.NoError(t, err)
 	assert.Equal(t, len(commits), len(sorted))
 
@@ -226,7 +226,7 @@ func TestSelectCommitsMissingObject(t *testing.T) {
 
 	_, ordIdx := openFixture(t)
 	src := openPackSource(t)
-	enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
+	enc := NewEncoder(src.pf, hash.New(crypto.SHA1), ordIdx)
 
 	// Use a hash that's not in the pack.
 	bogus, _ := plumbing.FromHex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -276,7 +276,7 @@ func findTips(t testing.TB, src *testPackSource) []plumbing.Hash {
 func BenchmarkSelectCommits(b *testing.B) {
 	_, ordIdx := openFixture(b)
 	src := openPackSource(b)
-	enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
+	enc := NewEncoder(src.pf, hash.New(crypto.SHA1), ordIdx)
 	tips := findTips(b, src)
 	b.Logf("tips=%d objects=%d", len(tips), src.Count())
 
@@ -317,7 +317,7 @@ func BenchmarkEncode(b *testing.B) {
 
 	b.ResetTimer()
 	for b.Loop() {
-		enc := NewEncoder(src, hash.New(crypto.SHA1), ordIdx)
+		enc := NewEncoder(src.pf, hash.New(crypto.SHA1), ordIdx)
 		err := enc.Encode(io.Discard, packChecksum, commits)
 		if err != nil {
 			b.Fatal(err)
