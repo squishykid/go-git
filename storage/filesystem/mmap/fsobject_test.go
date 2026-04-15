@@ -37,13 +37,9 @@ var data = []struct {
 func TestOndemandObject(t *testing.T) {
 	t.Parallel()
 	fixture := fixtures.NewOSFixture(fixtures.Basic().One(), t.TempDir())
-	pack, err := fixture.Packfile()
+	packfile, err := fixture.Packfile()
 	require.NoError(t, err)
-	idx, err := fixture.Idx()
-	require.NoError(t, err)
-	rev, err := fixture.Rev()
-	require.NoError(t, err)
-	scanner, err := NewPackScanner(crypto.SHA1.Size(), pack, idx, rev)
+	scanner, err := NewPackScanner(crypto.SHA1.Size(), packfile, fixture.Idx(), fixture.Rev())
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		err := scanner.Close()

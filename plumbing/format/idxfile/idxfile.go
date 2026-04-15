@@ -83,6 +83,7 @@ func NewMemoryIndex(objectIDSize int) *MemoryIndex {
 	return m
 }
 
+// todo this maps hash to packfile index
 func (idx *MemoryIndex) findHashIndex(h plumbing.Hash) (int, bool) {
 	k := idx.FanoutMapping[h.Bytes()[0]]
 	if k == noMapping {
