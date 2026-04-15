@@ -107,12 +107,11 @@ const revFileHeader = 12 // 4 sig + 4 version + 4 hash version
 
 func openPackSource(t testing.TB) *testPackSource {
 	t.Helper()
-	return openPackSourceByURL(t, "https://github.com/go-git/go-git.git", crypto.SHA1)
+	return openPackSourceFromQuery(t, fixtures.ByTag("bitmap-xor").One(), crypto.SHA1)
 }
 
-func openPackSourceByURL(t testing.TB, url string, h crypto.Hash) *testPackSource {
+func openPackSourceFromQuery(t testing.TB, q *fixtures.Fixture, h crypto.Hash) *testPackSource {
 	t.Helper()
-	q := fixtures.ByTag("bitmap").ByURL(url).One()
 
 	// Decode pack index.
 	idxFile, err := q.Idx()
@@ -313,7 +312,7 @@ func TestPackerNegotiateWithHaves(t *testing.T) {
 
 func openReadOnlyStorer(t testing.TB) *readOnlyStorer {
 	t.Helper()
-	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
+	q := fixtures.ByTag("bitmap-xor").One()
 	idxFile, err := q.Idx()
 	require.NoError(t, err)
 	defer idxFile.Close()
@@ -382,7 +381,7 @@ func TestNegotiateWalkMatchesRevlistObjects(t *testing.T) {
 
 	s := NewSearcher(bitmapIdx)
 	p := NewPacker(s, src.revIdx, src, hash.New(crypto.SHA1))
-	wants, haves := benchBitmapMiss()
+	wants, haves := benchBitmapMiss(t, bitmapIdx, src)
 
 	// Bitmap path (walks graph until hitting a bitmap entry).
 	bm, err := p.Negotiate(wants, haves)
@@ -460,38 +459,57 @@ func (s *readOnlyStorer) RawObjectWriter(plumbing.ObjectType, int64) (io.WriteCl
 
 func (s *readOnlyStorer) AddAlternate(string) error { return nil }
 
-// benchWantHave returns want/have hashes for a client ~1 week behind.
-// Entry 0 is the newest commit (2026-04-08), entry 77 is ~7 days
-// earlier (2026-04-01).
+// benchWantHave returns want/have hashes for two entries at opposite
+// ends of the bitmap-entry list — different enough that the revlist
+// walk has real graph to traverse.
 func benchWantHave(b *testing.B, idx *Index, src *testPackSource) (want, have plumbing.Hash) {
 	b.Helper()
 	want = src.hashAtIdx(idx.Entry(0).ObjectPosition)
-	have = src.hashAtIdx(idx.Entry(77).ObjectPosition)
+	have = src.hashAtIdx(idx.Entry(int(idx.EntryCount()) - 1).ObjectPosition)
 	return want, have
 }
 
 // benchBitmapMiss returns want/have hashes for commits that do NOT
-// have precomputed bitmap entries. Simulates a client ~1 week behind
-// tracking several branches.
+// have precomputed bitmap entries. Exercises the bitmap-miss walk
+// path: Negotiate must walk the commit graph until it reaches a
+// commit with a bitmap entry.
 //
-//	wants: 5 commits from 2026-03-28 to 2026-03-30
-//	haves: 5 commits from 2026-03-24
-func benchBitmapMiss() (wants, haves []plumbing.Hash) {
-	hex := func(s string) plumbing.Hash { h, _ := plumbing.FromHex(s); return h }
-	wants = []plumbing.Hash{
-		hex("949b9bb475494424d72adf28a4ab312703611b7d"),
-		hex("a7d9bf9aa32136dd22aba3c6ec218c6c7b27f475"),
-		hex("616469c3006bae526e37a9c349ee1ebe8c708b88"),
-		hex("91495350c82f8d3a5633354604e5f8e12be99a7f"),
-		hex("a93bccd59f82c947ede2c9d0e0062bc04e96c998"),
+// Hashes are discovered dynamically so the helper adapts to any
+// fixture — no hardcoded commits tied to a specific repo history.
+func benchBitmapMiss(tb testing.TB, idx *Index, src *testPackSource) (wants, haves []plumbing.Hash) {
+	tb.Helper()
+
+	hasEntry := make(map[uint32]bool, idx.EntryCount())
+	for i := range int(idx.EntryCount()) {
+		hasEntry[idx.Entry(i).ObjectPosition] = true
 	}
-	haves = []plumbing.Hash{
-		hex("cd85c8c75d344dfcc571c7e8897106a5e8622a58"),
-		hex("7002a0e5456172fa4d81a39996501146942e1ed9"),
-		hex("b1b844577fd751ad66e272426fc961494523f756"),
-		hex("a629a31674dd7da7bbfb2a18ab416ca6fec6c486"),
-		hex("772c1ee4f817aafd64544a9ac1180b2fe88ed29e"),
+
+	commitsBm, err := DecodeEWAH(idx.Commits())
+	require.NoError(tb, err)
+
+	var miss []uint32
+	it := commitsBm.SetBits()
+	for pos, ok := it.Next(); ok; pos, ok = it.Next() {
+		if !hasEntry[pos] {
+			miss = append(miss, pos)
+		}
 	}
+	require.GreaterOrEqualf(tb, len(miss), 10,
+		"need at least 10 commits without bitmap entries, got %d", len(miss))
+
+	toHashes := func(positions []uint32) []plumbing.Hash {
+		out := make([]plumbing.Hash, len(positions))
+		for i, pos := range positions {
+			out[i] = src.hashAtOffset(pos)
+		}
+		return out
+	}
+
+	// First 5 miss commits as wants, last 5 as haves. Commits are
+	// enumerated in pack-position order, so these come from
+	// different regions of the graph.
+	wants = toHashes(miss[:5])
+	haves = toHashes(miss[len(miss)-5:])
 	return wants, haves
 }
 
@@ -516,7 +534,7 @@ func BenchmarkNegotiateWalk(b *testing.B) {
 	src := openPackSource(b)
 	s := NewSearcher(bitmapIdx)
 
-	wants, haves := benchBitmapMiss()
+	wants, haves := benchBitmapMiss(b, bitmapIdx, src)
 
 	b.ResetTimer()
 	for b.Loop() {
@@ -529,8 +547,10 @@ func BenchmarkNegotiateWalk(b *testing.B) {
 }
 
 func BenchmarkRevlistObjectsWalk(b *testing.B) {
+	bitmapIdx, _ := openFixture(b)
+	src := openPackSource(b)
 	sto := openReadOnlyStorer(b)
-	wants, haves := benchBitmapMiss()
+	wants, haves := benchBitmapMiss(b, bitmapIdx, src)
 
 	b.ResetTimer()
 	for b.Loop() {

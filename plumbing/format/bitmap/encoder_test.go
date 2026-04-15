@@ -7,6 +7,7 @@ import (
 	"io"
 	"testing"
 
+	fixtures "github.com/go-git/go-git-fixtures/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/revfile"
 	"github.com/go-git/go-git/v6/plumbing/hash"
@@ -99,8 +100,9 @@ func TestEncodeMatchesFixture(t *testing.T) {
 func TestEncodeSHA256(t *testing.T) {
 	t.Parallel()
 
-	bitmapIdx, ordIdx := openFixtureByURL(t, "https://gitlab.com/pjbgf/sha256.git", crypto.SHA256)
-	src := openPackSourceByURL(t, "https://gitlab.com/pjbgf/sha256.git", crypto.SHA256)
+	q := fixtures.ByTag("bitmap").ByObjectFormat("sha256").One()
+	bitmapIdx, ordIdx := openFixtureFromQuery(t, q, crypto.SHA256)
+	src := openPackSourceFromQuery(t, q, crypto.SHA256)
 
 	commits := fixtureCommits(bitmapIdx, ordIdx)
 	packChecksum, _ := plumbing.FromBytes(bitmapIdx.PackChecksum())

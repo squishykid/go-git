@@ -16,7 +16,7 @@ import (
 
 func openFixture(t testing.TB) (*Index, revfile.RevIndex) {
 	t.Helper()
-	return openFixtureByURL(t, "https://github.com/go-git/go-git.git", crypto.SHA1)
+	return openFixtureFromQuery(t, fixtures.ByTag("bitmap-xor").One(), crypto.SHA1)
 }
 
 func getOrdinalIndexFromIdxFile(rIdx io.ReadCloser, rRev io.ReadCloser, h crypto.Hash) revfile.RevIndex {
@@ -51,9 +51,8 @@ func getOrdinalIndexFromIdxFile(rIdx io.ReadCloser, rRev io.ReadCloser, h crypto
 	return revfile.NewMemoryRevIndex(idx, got, h.Size())
 }
 
-func openFixtureByURL(t testing.TB, url string, h crypto.Hash) (*Index, revfile.RevIndex) {
+func openFixtureFromQuery(t testing.TB, q *fixtures.Fixture, h crypto.Hash) (*Index, revfile.RevIndex) {
 	t.Helper()
-	q := fixtures.ByTag("bitmap").ByURL(url).One()
 
 	f, err := q.Bitmap()
 	require.NoError(t, err)
@@ -79,7 +78,7 @@ func openFixtureByURL(t testing.TB, url string, h crypto.Hash) (*Index, revfile.
 func TestOpen(t *testing.T) {
 	t.Parallel()
 
-	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
+	q := fixtures.ByTag("bitmap-xor").One()
 
 	f, err := q.Bitmap()
 	require.NoError(t, err)
@@ -94,15 +93,15 @@ func TestOpen(t *testing.T) {
 	assert.Equal(t, uint16(1), idx.Version())
 	assert.Equal(t, uint16(OptFullDAG|OptHashCache), idx.Flags())
 	assert.Equal(t, q.PackfileHash, hex.EncodeToString(idx.PackChecksum()))
-	assert.Equal(t, uint32(140), idx.EntryCount())
+	assert.Equal(t, uint32(107), idx.EntryCount())
 
-	assert.Equal(t, uint32(6731), idx.Commits().BitCount())
-	assert.Equal(t, uint32(25072), idx.Trees().BitCount())
-	assert.Equal(t, uint32(25061), idx.Blobs().BitCount())
+	assert.Equal(t, uint32(643), idx.Commits().BitCount())
+	assert.Equal(t, uint32(2133), idx.Trees().BitCount())
+	assert.Equal(t, uint32(2122), idx.Blobs().BitCount())
 	assert.Equal(t, uint32(0), idx.Tags().BitCount())
 
 	cache := idx.NameHashCache()
-	assert.Equal(t, 25072*4, len(cache))
+	assert.Equal(t, 2133*4, len(cache))
 }
 
 func TestOpenEntries(t *testing.T) {
@@ -111,21 +110,21 @@ func TestOpenEntries(t *testing.T) {
 	idx, _ := openFixture(t)
 
 	e := idx.Entry(0)
-	assert.Equal(t, uint32(2393), e.ObjectPosition)
+	assert.Equal(t, uint32(1949), e.ObjectPosition)
 	assert.Equal(t, uint8(0), e.XOROffset)
 	assert.Equal(t, uint8(0), e.Flags)
 	assert.NotNil(t, e.Bitmap)
-	assert.Equal(t, uint32(25088), e.Bitmap.BitCount())
+	assert.Equal(t, uint32(2176), e.Bitmap.BitCount())
 
 	e = idx.Entry(1)
-	assert.Equal(t, uint32(12044), e.ObjectPosition)
+	assert.Equal(t, uint32(1755), e.ObjectPosition)
 	assert.Equal(t, uint8(1), e.XOROffset)
 }
 
 func TestOpenInvalidSignature(t *testing.T) {
 	t.Parallel()
 
-	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
+	q := fixtures.ByTag("bitmap-xor").One()
 	f, err := q.Idx()
 	require.NoError(t, err)
 	defer f.Close()
@@ -140,7 +139,7 @@ func TestOpenInvalidSignature(t *testing.T) {
 func TestOpenSHA256(t *testing.T) {
 	t.Parallel()
 
-	q := fixtures.ByTag("bitmap").ByURL("https://gitlab.com/pjbgf/sha256.git").One()
+	q := fixtures.ByTag("bitmap").ByObjectFormat("sha256").One()
 
 	f, err := q.Bitmap()
 	require.NoError(t, err)
@@ -161,7 +160,7 @@ func TestOpenSHA256(t *testing.T) {
 func TestOpenEntriesSHA256(t *testing.T) {
 	t.Parallel()
 
-	idx, _ := openFixtureByURL(t, "https://gitlab.com/pjbgf/sha256.git", crypto.SHA256)
+	idx, _ := openFixtureFromQuery(t, fixtures.ByTag("bitmap").ByObjectFormat("sha256").One(), crypto.SHA256)
 
 	e := idx.Entry(0)
 	assert.Greater(t, e.Bitmap.BitCount(), uint32(0))
@@ -171,7 +170,7 @@ func TestOpenEntriesSHA256(t *testing.T) {
 func TestSearcherReachableSHA256(t *testing.T) {
 	t.Parallel()
 
-	idx, _ := openFixtureByURL(t, "https://gitlab.com/pjbgf/sha256.git", crypto.SHA256)
+	idx, _ := openFixtureFromQuery(t, fixtures.ByTag("bitmap").ByObjectFormat("sha256").One(), crypto.SHA256)
 	s := NewSearcher(idx)
 
 	e := idx.Entry(0)
@@ -187,7 +186,7 @@ func TestSearcherReachableSHA256(t *testing.T) {
 }
 
 func BenchmarkOpen(b *testing.B) {
-	q := fixtures.ByTag("bitmap").ByURL("https://github.com/go-git/go-git.git").One()
+	q := fixtures.ByTag("bitmap-xor").One()
 
 	f, err := q.Bitmap()
 	require.NoError(b, err)
