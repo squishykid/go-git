@@ -393,9 +393,16 @@ func (e *Encoder) SelectCommits(tips []plumbing.Hash, maxDistance int) ([]Select
 		h := queue[0]
 		queue = queue[1:]
 
-		idxPos, ok := e.index.FindHashRank(h)
+		// FindHashRank returns a pack rank (offset-sorted position).
+		// Bitmap entry headers store the idx rank (hash-sorted position),
+		// so convert via IdxPosAtPackRank before recording.
+		packRank, ok := e.index.FindHashRank(h)
 		if !ok {
 			return nil, fmt.Errorf("%w: commit %s", ErrMissingObject, h)
+		}
+		idxPos, ok := e.index.IdxPosAtPackRank(packRank)
+		if !ok {
+			return nil, fmt.Errorf("%w: idx pos for commit %s at pack rank %d", ErrMissingObject, h, packRank)
 		}
 
 		obj, err := e.pf.Get(h)

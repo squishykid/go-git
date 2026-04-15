@@ -221,6 +221,60 @@ func TestTopoSort(t *testing.T) {
 	}
 }
 
+// TestSelectCommitsEncodeRoundTrip exercises the SelectCommits → Encode
+// → Searcher.Reachable round-trip. Each commit returned by SelectCommits
+// must be findable in the encoded bitmap via Searcher.Reachable using
+// the SelectedCommit.IdxPos value.
+//
+// Regression: SelectCommits used to store FindHashRank's result (a pack
+// rank) directly as SelectedCommit.IdxPos. Searcher interprets the
+// entry header field as an idx rank, so lookups missed for every commit
+// and the bitmap was effectively unreadable.
+func TestSelectCommitsEncodeRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	bitmapIdx, ordIdx := openFixture(t)
+	src := openPackSource(t)
+
+	head, _ := ordIdx.HashAtIdxRank(bitmapIdx.entries.commitPosition(0))
+	enc := NewEncoder(src.pf, hash.New(crypto.SHA1), ordIdx)
+
+	selected, err := enc.SelectCommits([]plumbing.Hash{head}, 0)
+	require.NoError(t, err)
+	require.NotEmpty(t, selected)
+
+	var buf bytes.Buffer
+	packChecksum, _ := plumbing.FromBytes(bitmapIdx.PackChecksum())
+	require.NoError(t, enc.Encode(&buf, packChecksum, selected))
+
+	parsed, err := Open(buf.Bytes(), hash.New(crypto.SHA1))
+	require.NoError(t, err)
+	require.Equal(t, uint32(len(selected)), parsed.EntryCount())
+
+	searcher := NewSearcher(parsed)
+
+	// Derive each commit's idx position independently (don't trust
+	// SelectedCommit.IdxPos — that's the value under test). Searcher
+	// expects the real idx rank; the historical bug stored pack ranks
+	// in the entry headers, making Reachable miss.
+	for _, sc := range selected {
+		packRank, ok := ordIdx.FindHashRank(sc.Hash)
+		require.Truef(t, ok, "FindHashRank for %s", sc.Hash)
+		idxPos, ok := ordIdx.IdxPosAtPackRank(packRank)
+		require.Truef(t, ok, "IdxPosAtPackRank for %s (pack rank %d)", sc.Hash, packRank)
+
+		bm, err := searcher.Reachable(idxPos)
+		require.NoErrorf(t, err, "Reachable(%d) for commit %s", idxPos, sc.Hash)
+		require.NotEmpty(t, bm, "empty bitmap for %s", sc.Hash)
+
+		// The commit's own bit (in pack-rank space) must be set in
+		// its own reachability bitmap.
+		assert.Truef(t, bm.Get(packRank),
+			"commit %s should be set in its own reachability bitmap (pack rank %d)",
+			sc.Hash, packRank)
+	}
+}
+
 func TestSelectCommitsMissingObject(t *testing.T) {
 	t.Parallel()
 
